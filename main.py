@@ -15,6 +15,7 @@ from error_analyzer import ErrorAnalyzer
 from correction_model import ModelTrainer
 from validation import ModelValidator
 from utils import setup_logger, load_dataset
+from sensitivity_analyzer import SensitivityAnalyzer
 import matplotlib
 
 matplotlib.rcParams['font.sans-serif'] = ['SimHei', 'Microsoft YaHei', 'SimSun']
@@ -24,9 +25,13 @@ def main():
     """主函数"""
     # 解析命令行参数
     parser = argparse.ArgumentParser(description='6S几何误差校正实验')
-    parser.add_argument('--phase', type=str, choices=['all', 'simulate', 'analyze', 'train', 'validate'],
+    parser.add_argument('--phase', type=str,
+                        choices=['all', 'simulate', 'analyze', 'sensitivity', 'train', 'validate'],
                         default='all', help='运行阶段')
-    parser.add_argument('--band', type=str, default='band1',
+    parser.add_argument('--mode', type=str,
+                        choices=['full', 'single_factor', 'multi_factor', 'airmass_only'],
+                        default='full', help='实验模式')
+    parser.add_argument('--band', type=str, default='band3',
                         help='目标波段 (band1, band2, band3)')
     parser.add_argument('--model_type', type=str, default='lut',
                         help='校正模型类型 (lut, linear, polynomial, ml)')
@@ -60,47 +65,49 @@ def main():
             logger.info("阶段1: 数据生成")
 
             # 检查是否已有数据
-            data_file = config.DATA_DIR / f"simulation_results_{args.band}.nc"
+            data_file = config.DATA_DIR / f"simulation_results_{args.band}_{args.mode}.nc"
             if data_file.exists() and not args.debug:
                 logger.info(f"数据文件已存在: {data_file}")
                 logger.info("跳过数据生成阶段，使用现有数据")
                 results = {args.band: pd.DataFrame(load_dataset(data_file))}
             else:
-                # 运行模拟
+                # 运行模拟（使用指定模式）
                 simulator = BatchSimulator(config, logger)
-                results = simulator.run_all_bands() if args.band == 'all' else {
-                    args.band: simulator.run_batch_simulation(args.band)
-                }
+                if args.band == 'all':
+                    results = {}
+                    for band_id in config.BANDS.keys():
+                        results[band_id] = simulator.run_batch_simulation(band_id, args.mode)
+                else:
+                    results = {args.band: simulator.run_batch_simulation(args.band, args.mode)}
 
         else:
             # 加载现有数据
             logger.info("加载现有数据")
-            if args.band == 'all':
-                results = {}
-                for band_id in config.BANDS.keys():
-                    data_file = config.DATA_DIR / f"simulation_results_{band_id}.nc"
-                    if data_file.exists():
-                        results[band_id] = pd.DataFrame(load_dataset(data_file))
-            else:
-                data_file = config.DATA_DIR / f"simulation_results_{args.band}.nc"
-                if not data_file.exists():
-                    raise FileNotFoundError(f"数据文件不存在: {data_file}")
-                results = {args.band: pd.DataFrame(load_dataset(data_file))}
+            data_file = config.DATA_DIR / f"simulation_results_{args.band}_{args.mode}.nc"
+            if not data_file.exists():
+                # 尝试加载其他模式的数据
+                alt_files = list(config.DATA_DIR.glob(f"simulation_results_{args.band}_*.nc"))
+                if alt_files:
+                    data_file = alt_files[0]
+                    logger.info(f"使用替代数据文件: {data_file}")
+                else:
+                    raise FileNotFoundError(f"找不到 {args.band} 的数据文件")
 
-        # 阶段2: 误差分析
-        if args.phase in ['all', 'analyze']:
-            logger.info("阶段2: 误差分析")
+            results = {args.band: pd.DataFrame(load_dataset(data_file))}
 
-            analyzer = ErrorAnalyzer(results, logger)
+            # 阶段2: 误差分析
+            if args.phase in ['all', 'analyze']:
+                logger.info("阶段2: 误差分析")
 
-            # 生成误差报告
-            report_file = config.RESULTS_DIR / f"error_analysis_report_{args.band}.txt"
-            report = analyzer.generate_error_report(report_file)
-            logger.info(f"误差分析报告已生成: {report_file}")
+                analyzer = ErrorAnalyzer(results, logger)
 
-            # 绘制误差分布图
-            dist_file = config.FIGURES_DIR / f"error_distribution_{args.band}.png"
-            analyzer.plot_error_distribution(dist_file)
+                # 生成误差报告
+                report_file = config.RESULTS_DIR / f"error_analysis_report_{args.band}_{args.mode}.txt"
+                report = analyzer.generate_error_report(report_file)
+
+                # 绘制误差图
+                dist_file = config.FIGURES_DIR / f"error_distribution_{args.band}_{args.mode}.png"
+                analyzer.plot_error_distribution(dist_file)
 
             # 绘制误差等高线图
             contour_file = config.FIGURES_DIR / f"error_contour_{args.band}.png"
@@ -109,6 +116,35 @@ def main():
             # 按参数分组分析
             param_file = config.FIGURES_DIR / f"error_by_parameter_{args.band}.png"
             analyzer.plot_error_by_parameter(param_file)
+
+        # 新增阶段: 敏感性分析
+        if args.phase in ['all', 'sensitivity']:
+            logger.info("阶段2.5: 敏感性分析")
+
+            # 合并数据
+            all_data = pd.concat([df for df in results.values()], ignore_index=True)
+
+            # 创建敏感性分析器
+            sensitivity_analyzer = SensitivityAnalyzer(all_data, logger)
+
+            # 生成敏感性报告
+            sens_report_file = config.RESULTS_DIR / f"sensitivity_report_{args.band}_{args.mode}.txt"
+            sens_report = sensitivity_analyzer.generate_sensitivity_report(sens_report_file)
+            logger.info(f"敏感性分析报告已生成: {sens_report_file}")
+
+            # 绘制单因素敏感性图
+            single_factor_file = config.FIGURES_DIR / f"sensitivity_single_factor_{args.band}_{args.mode}.png"
+            sensitivity_analyzer.plot_single_factor_sensitivity(single_factor_file)
+
+            # 绘制交互效应图
+            interaction_file = config.FIGURES_DIR / f"sensitivity_interaction_{args.band}_{args.mode}.png"
+            sensitivity_analyzer.plot_interaction_effects(interaction_file)
+
+            # 绘制大气质量分解图
+            airmass_file = config.FIGURES_DIR / f"sensitivity_airmass_{args.band}_{args.mode}.png"
+            sensitivity_analyzer.plot_airmass_breakdown(airmass_file)
+
+            logger.info("敏感性分析完成")
 
         # 阶段3: 模型训练
         if args.phase in ['all', 'train']:

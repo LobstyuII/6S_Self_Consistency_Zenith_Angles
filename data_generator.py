@@ -43,6 +43,7 @@ class SixSSimulator:
             'Tropical': AtmosProfile.PredefinedType(AtmosProfile.Tropical),
             'SubarcticSummer': AtmosProfile.PredefinedType(AtmosProfile.SubarcticSummer),
             'SubarcticWinter': AtmosProfile.PredefinedType(AtmosProfile.SubarcticWinter),
+            'UserWaterAndOzone': None  # 标记为使用自定义水汽臭氧
         }
 
         self.aero_profile_map = {
@@ -56,28 +57,29 @@ class SixSSimulator:
     def create_sixs_instance(self, params: Dict[str, float],
                              mode: str = 'forward') -> SixS:
         """
-        创建并配置6S实例
-
-        Parameters:
-        -----------
-        params : dict
-            包含所有参数的字典
-        mode : str
-            模式: 'forward' (正向) 或 'inversion' (反演)
-
-        Returns:
-        --------
-        SixS
-            配置好的6S实例
+        创建并配置6S实例（修正水汽和臭氧设置）
         """
         s = SixS()
 
         # 设置波长
         s.wavelength = Wavelength(self.band_wavelength)
 
-        # 设置大气廓线
+        # 设置大气廓线 - 使用UserWaterAndOzone方法
         atmos_key = params.get('atmos_profile', 'MidlatitudeSummer')
-        s.atmos_profile = self.atmos_profile_map.get(atmos_key)
+
+        if 'h2o' in params and 'o3' in params:
+            # 使用自定义水汽和臭氧
+            try:
+                water = params['h2o']
+                ozone = params['o3']
+                s.atmos_profile = AtmosProfile.UserWaterAndOzone(water, ozone)
+                self.logger.debug(f"使用自定义水汽({water}g/cm²)和臭氧({ozone}cm-atm)")
+            except Exception as e:
+                self.logger.error(f"设置水汽臭氧失败: {e}, 使用预定义廓线")
+                s.atmos_profile = self.atmos_profile_map.get(atmos_key)
+        else:
+            # 使用预定义大气廓线
+            s.atmos_profile = self.atmos_profile_map.get(atmos_key)
 
         # 设置气溶胶
         aero_key = params.get('aero_profile', 'Continental')
@@ -91,7 +93,7 @@ class SixSSimulator:
         s.geometry.solar_z = params['sza']
         s.geometry.solar_a = 0.0  # 假设太阳方位角为0
         s.geometry.view_z = params['vza']
-        s.geometry.view_a = params['raa']  # 使用相对方位角作为观测方位角
+        s.geometry.view_a = params['raa']
 
         # 设置海拔
         s.altitudes = Altitudes()
@@ -100,21 +102,11 @@ class SixSSimulator:
 
         # 根据模式设置不同的参数
         if mode == 'forward':
-            # 正向模拟：设置地表反射率
-            if 'rho_true' in params:
-                s.ground_reflectance = GroundReflectance.HomogeneousLambertian(
-                    params['rho_true']
-                )
-            else:
-                # 如果没有提供rho_true，使用默认值0.2
-                s.ground_reflectance = GroundReflectance.HomogeneousLambertian(0.2)
-
-            # 不使用大气校正
+            s.ground_reflectance = GroundReflectance.HomogeneousLambertian(
+                params.get('rho_true', 0.2)
+            )
             s.atmos_corr = AtmosCorr.NoAtmosCorr()
-
         elif mode == 'inversion':
-            # 反演模式：不需要设置地表反射率
-            # 在反演模式下，地表反射率由AtmosCorr计算
             pass
 
         return s
@@ -123,16 +115,6 @@ class SixSSimulator:
     def run_forward_simulation(self, params: Dict[str, float]) -> Dict[str, float]:
         """
         运行正向模拟：地表反射率 → TOA反射率
-
-        Parameters:
-        -----------
-        params : dict
-            输入参数
-
-        Returns:
-        --------
-        dict
-            模拟结果
         """
         try:
             s = self.create_sixs_instance(params, mode='forward')
@@ -142,18 +124,21 @@ class SixSSimulator:
             rho_toa = s.outputs.values['apparent_reflectance']
 
             # 计算几何因子
-            secz_sza = calculate_airmass(params['sza'])
-            secz_vza = calculate_airmass(params['vza'])
+            airmass_sza = calculate_airmass(params['sza'])
+            airmass_vza = calculate_airmass(params['vza'])
 
             result = {
                 'rho_true': params.get('rho_true', 0.2),
                 'rho_toa': rho_toa,
-                'secz_sza': secz_sza,
-                'secz_vza': secz_vza,
+                'airmass_sza': airmass_sza,
+                'airmass_vza': airmass_vza,
+                'total_airmass': airmass_sza + airmass_vza,
                 'sza': params['sza'],
                 'vza': params['vza'],
                 'raa': params['raa'],
                 'aod550': params.get('aod550', 0.2),
+                'h2o': params.get('h2o', np.nan),
+                'o3': params.get('o3', np.nan),
                 'success': True
             }
 
@@ -164,12 +149,15 @@ class SixSSimulator:
             return {
                 'rho_true': params.get('rho_true', 0.2),
                 'rho_toa': np.nan,
-                'secz_sza': np.nan,
-                'secz_vza': np.nan,
+                'airmass_sza': np.nan,
+                'airmass_vza': np.nan,
+                'total_airmass': np.nan,
                 'sza': params['sza'],
                 'vza': params['vza'],
                 'raa': params['raa'],
                 'aod550': params.get('aod550', 0.2),
+                'h2o': params.get('h2o', np.nan),
+                'o3': params.get('o3', np.nan),
                 'success': False,
                 'error': str(e)
             }
@@ -177,18 +165,6 @@ class SixSSimulator:
     def run_inversion(self, rho_toa: float, params: Dict[str, float]) -> Dict[str, float]:
         """
         运行反演：TOA反射率 → 反演地表反射率
-
-        Parameters:
-        -----------
-        rho_toa : float
-            TOA反射率
-        params : dict
-            大气和几何参数（不包括rho_true）
-
-        Returns:
-        --------
-        dict
-            反演结果
         """
         try:
             s = self.create_sixs_instance(params, mode='inversion')
@@ -221,16 +197,6 @@ class SixSSimulator:
     def run_closed_loop(self, params: Dict[str, float]) -> Dict[str, float]:
         """
         运行闭合循环：正向+反演
-
-        Parameters:
-        -----------
-        params : dict
-            完整参数集
-
-        Returns:
-        --------
-        dict
-            包含误差的完整结果
         """
         # 正向模拟
         forward_result = self.run_forward_simulation(params)
@@ -271,9 +237,6 @@ class SixSSimulator:
             'error_relative': error_rel,
             'closed_loop_success': True
         }
-
-
-# 后续代码保持不变...
 
 
 class BatchSimulator:
@@ -334,7 +297,7 @@ class BatchSimulator:
                 **params
             }
 
-    def run_batch_simulation(self, band_id: str = 'band3') -> pd.DataFrame:
+    def run_batch_simulation(self, band_id: str = 'band3', mode: str = 'full') -> pd.DataFrame:
         """
         运行批量模拟
 
@@ -348,10 +311,10 @@ class BatchSimulator:
         pd.DataFrame
             模拟结果
         """
-        self.logger.info(f"开始批量模拟 - 波段: {band_id}")
+        self.logger.info(f"开始批量模拟 - 波段: {band_id}, 模式: {mode}")
 
-        # 获取所有参数组合
-        param_list = self.config.get_param_combinations()
+        # 获取所有参数组合（根据模式）
+        param_list = self.config.get_param_combinations(mode)
 
         # 准备任务列表
         tasks = [(band_id, params) for params in param_list]
@@ -363,8 +326,7 @@ class BatchSimulator:
         chunk_size = self.config.PARALLEL_CONFIG['chunk_size']
 
         with Pool(processes=n_workers) as pool:
-            # 使用tqdm显示进度
-            with tqdm(total=len(tasks), desc=f"模拟 {band_id}") as pbar:
+            with tqdm(total=len(tasks), desc=f"模拟 {band_id} ({mode})") as pbar:
                 for result in pool.imap_unordered(
                         self.simulate_single_task, tasks, chunksize=chunk_size
                 ):
@@ -381,7 +343,7 @@ class BatchSimulator:
         self.logger.info(f"模拟完成 - 成功率: {success_rate:.1f}%, 有效数据率: {valid_rate:.1f}%")
 
         # 保存结果
-        output_file = self.config.DATA_DIR / f"simulation_results_{band_id}.nc"
+        output_file = self.config.DATA_DIR / f"simulation_results_{band_id}_{mode}.nc"
         save_dataset(df_results.to_dict('list'), output_file)
         self.logger.info(f"结果已保存: {output_file}")
 
