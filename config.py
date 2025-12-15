@@ -40,11 +40,13 @@ class ExperimentConfig:
     PARAM_SPACE = {
         'sza': np.arange(0, 86, 5),  # 太阳天顶角 (0-85°, 5°步长)
         'vza': np.arange(0, 76, 5),  # 观测天顶角 (0-75°, 5°步长)
-        'raa': [0, 90, 180],  # 相对方位角
+        'raa': [0],  # 相对方位角
         'rho_true': [0.05, 0.1, 0.2, 0.4],  # 地表真实反射率
         'aod550': [0.1, 0.3, 0.5],  # 550nm气溶胶光学厚度
-        'h2o': [1.0, 2.0, 3.0],  # 水汽含量 (g/cm²)
-        'o3': [0.2, 0.3, 0.4],  # 臭氧含量 (cm-atm)
+        # 'h2o': [1.0, 2.0, 3.0],  # 水汽含量 (g/cm²)
+        'h2o': [2.0],  # 水汽含量 (g/cm²)
+        # 'o3': [0.2, 0.3, 0.4],  # 臭氧含量 (cm-atm)
+        'o3': [0.3],  # 臭氧含量 (cm-atm)
         'atmos_profile': ['MidlatitudeSummer'],  # 大气廓线
         'aero_profile': ['Continental']  # 气溶胶类型
     }
