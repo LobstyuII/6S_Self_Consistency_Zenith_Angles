@@ -16,7 +16,7 @@ class ExperimentConfig:
     EXP_DATE = datetime.now().strftime("%Y%m%d")
 
     # 路径配置
-    BASE_DIR = Path("D:/PythonProject2_data_band1")  # 修改为实际路径
+    BASE_DIR = Path("D:/6S_Self_Consistency_Zenith_Angles")  # 修改为实际路径
     DATA_DIR = BASE_DIR / "data"
     RESULTS_DIR = BASE_DIR / "results"
     FIGURES_DIR = BASE_DIR / "figures"
