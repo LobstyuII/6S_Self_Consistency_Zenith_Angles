@@ -661,12 +661,13 @@ class ErrorAnalyzer:
 
     def create_summary_figure(self,
                               fixed_conditions: Dict[str, float] = None,
+                              band_id: str = 'band3',
                               save_path: Optional[Path] = None):
         """
         创建综合摘要图
         """
         if fixed_conditions is None:
-            fixed_conditions = {'aod550': 0.3, 'rho_true': 0.2, 'band': 'band3'}
+            fixed_conditions = {'aod550': 0.3, 'rho_true': 0.2, 'band': band_id}
 
         fig = plt.figure(figsize=(16, 12))
         gs = gridspec.GridSpec(3, 3, figure=fig, hspace=0.3, wspace=0.3)
