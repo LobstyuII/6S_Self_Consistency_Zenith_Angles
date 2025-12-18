@@ -23,6 +23,7 @@ import matplotlib
 matplotlib.rcParams['font.sans-serif'] = ['SimHei', 'Microsoft YaHei', 'SimSun']
 matplotlib.rcParams['axes.unicode_minus'] = False
 
+
 class ErrorAnalyzer:
     """误差分析器"""
 
@@ -52,10 +53,24 @@ class ErrorAnalyzer:
         for band_id, df in self.results.items():
             df_band = df.copy()
             df_band['band'] = band_id
-            df_band['wavelength'] = ExperimentConfig.BANDS[band_id]['wavelength']
+
+            # 处理特殊情况：波段ID为'all'时，尝试从数据中获取波长
+            if band_id == 'all' and 'wavelength' in df_band.columns:
+                # 如果已经有波长信息，直接使用
+                pass
+            elif band_id in ExperimentConfig.BANDS:
+                df_band['wavelength'] = ExperimentConfig.BANDS[band_id]['wavelength']
+            else:
+                # 对于未知波段，使用NaN或默认值
+                df_band['wavelength'] = np.nan
+                self.logger.warning(f"波段 {band_id} 不在配置中，波长设为NaN")
+
             dfs.append(df_band)
 
-        return pd.concat(dfs, ignore_index=True)
+        if dfs:
+            return pd.concat(dfs, ignore_index=True)
+        else:
+            return pd.DataFrame()
 
     def calculate_overall_statistics(self) -> Dict[str, Dict[str, float]]:
         """计算总体统计量"""
@@ -98,11 +113,20 @@ class ErrorAnalyzer:
 
     def plot_error_distribution(self, save_path: Optional[Path] = None):
         """绘制误差分布图"""
+        # 检查是否有数据
+        if self.all_data.empty or 'error_absolute' not in self.all_data.columns:
+            self.logger.warning("没有误差数据，无法绘制误差分布图")
+            return
+
+        errors = self.all_data['error_absolute'].dropna()
+        if len(errors) == 0:
+            self.logger.warning("没有有效的误差数据")
+            return
+
         fig, axes = plt.subplots(2, 2, figsize=(12, 10))
         axes = axes.ravel()
 
         # 1. 误差直方图
-        errors = self.all_data['error_absolute'].dropna()
         axes[0].hist(errors, bins=50, density=True, alpha=0.7, edgecolor='black')
         axes[0].set_xlabel('绝对误差')
         axes[0].set_ylabel('概率密度')
@@ -120,52 +144,71 @@ class ErrorAnalyzer:
                      verticalalignment='top', bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8))
 
         # 2. 误差与SZA的关系
-        valid_data = self.all_data.dropna(subset=['error_absolute', 'sza'])
-        axes[1].scatter(valid_data['sza'], valid_data['error_absolute'],
-                        alpha=0.5, s=1, c=valid_data['wavelength'], cmap='viridis')
-        axes[1].set_xlabel('太阳天顶角 (度)')
-        axes[1].set_ylabel('绝对误差')
-        axes[1].set_title('误差 vs 太阳天顶角')
-        axes[1].grid(True, alpha=0.3)
+        if 'sza' in self.all_data.columns:
+            valid_data = self.all_data.dropna(subset=['error_absolute', 'sza'])
+            if len(valid_data) > 0:
+                if 'wavelength' in valid_data.columns:
+                    axes[1].scatter(valid_data['sza'], valid_data['error_absolute'],
+                                    alpha=0.5, s=1, c=valid_data['wavelength'], cmap='viridis')
+                else:
+                    axes[1].scatter(valid_data['sza'], valid_data['error_absolute'],
+                                    alpha=0.5, s=1, color='blue')
+                axes[1].set_xlabel('太阳天顶角 (度)')
+                axes[1].set_ylabel('绝对误差')
+                axes[1].set_title('误差 vs 太阳天顶角')
+                axes[1].grid(True, alpha=0.3)
 
         # 3. 误差与VZA的关系
-        valid_data = self.all_data.dropna(subset=['error_absolute', 'vza'])
-        axes[2].scatter(valid_data['vza'], valid_data['error_absolute'],
-                        alpha=0.5, s=1, c=valid_data['wavelength'], cmap='viridis')
-        axes[2].set_xlabel('观测天顶角 (度)')
-        axes[2].set_ylabel('绝对误差')
-        axes[2].set_title('误差 vs 观测天顶角')
-        axes[2].grid(True, alpha=0.3)
+        if 'vza' in self.all_data.columns:
+            valid_data = self.all_data.dropna(subset=['error_absolute', 'vza'])
+            if len(valid_data) > 0:
+                if 'wavelength' in valid_data.columns:
+                    axes[2].scatter(valid_data['vza'], valid_data['error_absolute'],
+                                    alpha=0.5, s=1, c=valid_data['wavelength'], cmap='viridis')
+                else:
+                    axes[2].scatter(valid_data['vza'], valid_data['error_absolute'],
+                                    alpha=0.5, s=1, color='blue')
+                axes[2].set_xlabel('观测天顶角 (度)')
+                axes[2].set_ylabel('绝对误差')
+                axes[2].set_title('误差 vs 观测天顶角')
+                axes[2].grid(True, alpha=0.3)
 
         # 4. 误差与sec(SZA)*sec(VZA)的关系
-        valid_data = valid_data.copy()
-        valid_data['airmass_product'] = valid_data['secz_sza'] * valid_data['secz_vza']
+        if all(col in self.all_data.columns for col in ['secz_sza', 'secz_vza', 'error_absolute']):
+            valid_data = self.all_data.dropna(subset=['secz_sza', 'secz_vza', 'error_absolute'])
+            if len(valid_data) > 0:
+                valid_data = valid_data.copy()
+                valid_data['airmass_product'] = valid_data['secz_sza'] * valid_data['secz_vza']
 
-        axes[3].scatter(valid_data['airmass_product'], valid_data['error_absolute'],
-                        alpha=0.5, s=1, c=valid_data['wavelength'], cmap='viridis')
-        axes[3].set_xlabel('sec(SZA) × sec(VZA)')
-        axes[3].set_ylabel('绝对误差')
-        axes[3].set_title('误差 vs 大气质量乘积')
-        axes[3].grid(True, alpha=0.3)
+                if 'wavelength' in valid_data.columns:
+                    axes[3].scatter(valid_data['airmass_product'], valid_data['error_absolute'],
+                                    alpha=0.5, s=1, c=valid_data['wavelength'], cmap='viridis')
+                else:
+                    axes[3].scatter(valid_data['airmass_product'], valid_data['error_absolute'],
+                                    alpha=0.5, s=1, color='blue')
+                axes[3].set_xlabel('sec(SZA) × sec(VZA)')
+                axes[3].set_ylabel('绝对误差')
+                axes[3].set_title('误差 vs 大气质量乘积')
+                axes[3].grid(True, alpha=0.3)
 
-        # 添加线性拟合
-        if len(valid_data) > 2:
-            x = valid_data['airmass_product'].values
-            y = valid_data['error_absolute'].values
-            slope, intercept, r_value, p_value, std_err = stats.linregress(x, y)
-            x_fit = np.linspace(x.min(), x.max(), 100)
-            y_fit = slope * x_fit + intercept
-            axes[3].plot(x_fit, y_fit, 'r-', linewidth=2,
-                         label=f'拟合: y = {slope:.4f}x + {intercept:.4f}\nR2 = {r_value ** 2:.4f}')
-            axes[3].legend()
+                # 添加线性拟合
+                if len(valid_data) > 2:
+                    x = valid_data['airmass_product'].values
+                    y = valid_data['error_absolute'].values
+                    slope, intercept, r_value, p_value, std_err = stats.linregress(x, y)
+                    x_fit = np.linspace(x.min(), x.max(), 100)
+                    y_fit = slope * x_fit + intercept
+                    axes[3].plot(x_fit, y_fit, 'r-', linewidth=2,
+                                 label=f'拟合: y = {slope:.4f}x + {intercept:.4f}\nR2 = {r_value ** 2:.4f}')
+                    axes[3].legend()
 
         plt.tight_layout()
 
         if save_path:
             plt.savefig(save_path, dpi=300, bbox_inches='tight')
             self.logger.info(f"误差分布图已保存: {save_path}")
-
-        # plt.show()
+        else:
+            plt.show()
 
     def plot_layered_contours(self,
                               primary_factors: List[str] = ['sza', 'vza'],
@@ -667,17 +710,32 @@ class ErrorAnalyzer:
         创建综合摘要图
         """
         if fixed_conditions is None:
-            fixed_conditions = {'aod550': 0.3, 'rho_true': 0.2, 'band': band_id}
+            fixed_conditions = {'aod550': 0.3, 'rho_true': 0.2}
+
+        # 根据band_id筛选数据
+        if band_id == 'all':
+            data = self.all_data.copy()
+        elif band_id in self.results:
+            data = self.results[band_id].copy()
+        else:
+            self.logger.warning(f"波段 {band_id} 不在结果中")
+            return
+
+        # 应用固定条件
+        for key, value in fixed_conditions.items():
+            if key in data.columns:
+                data = data[data[key] == value]
+
+        # 检查是否有误差数据
+        if 'error_absolute' not in data.columns or data['error_absolute'].dropna().empty:
+            self.logger.warning(f"波段 {band_id} 没有误差数据")
+            return
 
         fig = plt.figure(figsize=(16, 12))
         gs = gridspec.GridSpec(3, 3, figure=fig, hspace=0.3, wspace=0.3)
 
         # 1. 误差等高线图（最具代表性条件）
         ax1 = fig.add_subplot(gs[0, :2])
-        data = self.all_data.copy()
-        for key, value in fixed_conditions.items():
-            if key in data.columns:
-                data = data[data[key] == value]
 
         if len(data) > 10:
             self._plot_single_contour(data, ax1, ['sza', 'vza'], 'error_absolute')
@@ -699,13 +757,15 @@ class ErrorAnalyzer:
 
         # 3. SZA条件分位数回归（简化版）
         ax3 = fig.add_subplot(gs[1, 0])
-        self._plot_simple_scatter_with_trend(data, 'sza', ax3)
-        ax3.set_title('(c) SZA Effect', fontsize=12)
+        if 'sza' in data.columns:
+            self._plot_simple_scatter_with_trend(data, 'sza', ax3)
+            ax3.set_title('(c) SZA Effect', fontsize=12)
 
         # 4. VZA条件分位数回归（简化版）
         ax4 = fig.add_subplot(gs[1, 1])
-        self._plot_simple_scatter_with_trend(data, 'vza', ax4)
-        ax4.set_title('(d) VZA Effect', fontsize=12)
+        if 'vza' in data.columns:
+            self._plot_simple_scatter_with_trend(data, 'vza', ax4)
+            ax4.set_title('(d) VZA Effect', fontsize=12)
 
         # 5. 因素重要性（使用随机森林）
         ax5 = fig.add_subplot(gs[1, 2])
@@ -741,7 +801,7 @@ class ErrorAnalyzer:
             ax8.grid(True, alpha=0.3)
 
         conditions_str = ', '.join([f'{k}={v}' for k, v in fixed_conditions.items()])
-        plt.suptitle(f'Summary of Geometric Error Analysis\nFixed Conditions: {conditions_str}',
+        plt.suptitle(f'Summary of Geometric Error Analysis - Band: {band_id}\nFixed Conditions: {conditions_str}',
                      fontsize=16, y=1.02)
         plt.tight_layout()
 

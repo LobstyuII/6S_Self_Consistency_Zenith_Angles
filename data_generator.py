@@ -337,15 +337,47 @@ class BatchSimulator:
         df_results = pd.DataFrame(results)
 
         # 计算成功率和有效数据率
-        success_rate = df_results['closed_loop_success'].mean() * 100
-        valid_rate = df_results['error_absolute'].notna().mean() * 100
+        success_count = df_results['closed_loop_success'].sum() if 'closed_loop_success' in df_results.columns else 0
+        success_rate = (success_count / len(df_results)) * 100 if len(df_results) > 0 else 0
+
+        error_count = df_results['error_absolute'].notna().sum() if 'error_absolute' in df_results.columns else 0
+        valid_rate = (error_count / len(df_results)) * 100 if len(df_results) > 0 else 0
 
         self.logger.info(f"模拟完成 - 成功率: {success_rate:.1f}%, 有效数据率: {valid_rate:.1f}%")
 
-        # 保存结果
+        # 保存结果 - 修复保存格式
         output_file = self.config.DATA_DIR / f"simulation_results_{band_id}_{mode}.nc"
-        save_dataset(df_results.to_dict('list'), output_file)
+
+        # 修复：确保数据字典中的值是numpy数组，而不是列表
+        data_dict = {}
+        for col in df_results.columns:
+            # 将列转换为numpy数组
+            col_data = df_results[col].values
+
+            # 处理特殊类型
+            if col_data.dtype == object:
+                # 对于对象类型，尝试转换为字符串
+                try:
+                    col_data = col_data.astype(str)
+                except:
+                    pass
+
+            data_dict[col] = col_data
+
+        save_dataset(data_dict, output_file)
         self.logger.info(f"结果已保存: {output_file}")
+
+        # 输出数据信息
+        self.logger.info(f"数据形状: {df_results.shape}")
+        self.logger.info(f"数据列: {list(df_results.columns)}")
+
+        # 显示前几行数据
+        if len(df_results) > 0:
+            self.logger.info(f"数据示例:")
+            for i in range(min(3, len(df_results))):
+                sample = df_results.iloc[i]
+                self.logger.info(f"  行{i}: sza={sample.get('sza', 'N/A')}, vza={sample.get('vza', 'N/A')}, "
+                                 f"error={sample.get('error_absolute', 'N/A')}")
 
         return df_results
 
@@ -358,4 +390,3 @@ class BatchSimulator:
             results[band_id] = self.run_batch_simulation(band_id)
 
         return results
-
