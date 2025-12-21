@@ -1,9 +1,10 @@
-# ==================== recreate_data.py ====================
+#!/usr/bin/env python
 """
 清理并重新生成数据
 """
 import shutil
 from pathlib import Path
+import sys
 
 from config import ExperimentConfig
 from data_generator import BatchSimulator
@@ -14,6 +15,7 @@ def recreate_data():
     """重新生成所有数据"""
     logger = setup_logger('RecreateData')
 
+    # 清理数据目录
     data_dir = ExperimentConfig.DATA_DIR
     if data_dir.exists():
         logger.info(f"清理数据目录: {data_dir}")
@@ -21,9 +23,11 @@ def recreate_data():
             file.unlink()
             logger.info(f"删除: {file}")
 
+    # 重新生成数据
     logger.info("开始重新生成数据...")
     simulator = BatchSimulator(ExperimentConfig, logger)
 
+    # 生成所有波段数据
     results = {}
     for band_id in ExperimentConfig.BANDS.keys():
         logger.info(f"生成波段 {band_id} 数据...")

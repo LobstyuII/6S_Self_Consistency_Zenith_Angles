@@ -4,7 +4,7 @@
 """
 import numpy as np
 import pandas as pd
-from typing import Dict, List, Tuple, Optional
+from typing import Dict, List, Tuple, Optional, Callable, Union
 from pathlib import Path
 from scipy import interpolate
 from scipy.optimize import curve_fit
@@ -19,21 +19,35 @@ class CorrectionModel:
     """校正模型基类"""
 
     def __init__(self, model_type: str = 'lut', logger=None):
+        """
+        初始化校正模型
+
+        Parameters:
+        -----------
+        model_type : str
+            模型类型 ('lut', 'linear', 'polynomial', 'ml')
+        logger : logging.Logger, optional
+            日志记录器
+        """
         self.model_type = model_type
         self.logger = logger or setup_logger('CorrectionModel')
         self.model = None
         self.metadata = {}
 
     def fit(self, X: np.ndarray, y: np.ndarray):
+        """训练模型"""
         raise NotImplementedError
 
     def predict(self, X: np.ndarray) -> np.ndarray:
+        """预测校正值"""
         raise NotImplementedError
 
     def save(self, filepath: Path):
+        """保存模型"""
         raise NotImplementedError
 
     def load(self, filepath: Path):
+        """加载模型"""
         raise NotImplementedError
 
 
@@ -41,48 +55,95 @@ class LUTCorrectionModel(CorrectionModel):
     """查找表校正模型"""
 
     def __init__(self, dimensions: List[str] = None, logger=None):
+        """
+        初始化LUT模型
+
+        Parameters:
+        -----------
+        dimensions : list
+            插值维度 ['sza', 'vza', 'raa', 'aod550', 'rho_true']
+        """
         super().__init__('lut', logger)
-        self.dimensions = dimensions or ['sza', 'vza', 'aod550']
+        self.dimensions = dimensions or ['sza', 'vza', 'raa', 'aod550']
         self.grid_points = {}
         self.lut_values = None
         self.interpolator = None
 
     def create_lut_grid(self, data: pd.DataFrame) -> Dict[str, np.ndarray]:
-        """创建LUT网格"""
+        """
+        创建LUT网格
+
+        Parameters:
+        -----------
+        data : pd.DataFrame
+            训练数据
+
+        Returns:
+        --------
+        dict
+            网格点字典
+        """
         grid_points = {}
+
         for dim in self.dimensions:
             if dim in data.columns:
+                # 获取唯一值并排序
                 unique_vals = np.sort(data[dim].unique())
                 grid_points[dim] = unique_vals
                 self.logger.info(f"维度 {dim}: {len(unique_vals)} 个点")
+
         return grid_points
 
     def create_lut_from_data(self, data: pd.DataFrame, value_col: str = 'error_absolute'):
-        """从数据创建LUT"""
+        """
+        从数据创建LUT
+
+        Parameters:
+        -----------
+        data : pd.DataFrame
+            训练数据
+        value_col : str
+            插值值列名
+        """
+        # 创建网格
         self.grid_points = self.create_lut_grid(data)
+
+        # 创建网格坐标
         mesh_grids = np.meshgrid(*self.grid_points.values(), indexing='ij')
+
+        # 初始化LUT值数组
         lut_shape = tuple(len(vals) for vals in self.grid_points.values())
         self.lut_values = np.full(lut_shape, np.nan)
 
+        # 填充LUT
         self.logger.info("填充LUT...")
+
+        # 为每个网格点计算平均值
         for idx in np.ndindex(lut_shape):
+            # 创建筛选条件
             conditions = []
             for i, (dim_name, dim_vals) in enumerate(self.grid_points.items()):
                 target_value = dim_vals[idx[i]]
                 conditions.append(data[dim_name] == target_value)
 
+            # 组合条件
             if conditions:
                 mask = conditions[0]
                 for cond in conditions[1:]:
                     mask = mask & cond
 
+                # 计算平均值
                 if mask.any():
                     self.lut_values[idx] = data.loc[mask, value_col].mean()
 
+        # 创建插值器
         self._create_interpolator()
+
+        # 计算LUT填充率
         fill_rate = np.sum(~np.isnan(self.lut_values)) / self.lut_values.size
         self.logger.info(f"LUT填充率: {fill_rate:.1%}")
 
+        # 保存元数据
         self.metadata = {
             'dimensions': self.dimensions,
             'grid_shape': lut_shape,
@@ -93,16 +154,22 @@ class LUTCorrectionModel(CorrectionModel):
     def _create_interpolator(self):
         """创建插值器"""
         try:
+            # 准备插值点
             points = [vals for vals in self.grid_points.values()]
-            valid_mask = ~np.isnan(self.lut_values.ravel())
 
+            # 清理数据：移除NaN值
+            valid_mask = ~np.isnan(self.lut_values.ravel())
             if not valid_mask.any():
                 raise ValueError("没有有效数据点")
 
+            # 获取有效点的坐标和值
             valid_coords = np.array(np.meshgrid(*points, indexing='ij')).T.reshape(-1, len(points))[valid_mask]
             valid_values = self.lut_values.ravel()[valid_mask]
 
+            # 创建线性插值器
             self.interpolator = interpolate.LinearNDInterpolator(valid_coords, valid_values, fill_value=0.0)
+
+            # 创建最近邻插值器作为后备
             self.nn_interpolator = interpolate.NearestNDInterpolator(valid_coords, valid_values)
 
         except Exception as e:
@@ -110,15 +177,32 @@ class LUTCorrectionModel(CorrectionModel):
             raise
 
     def fit(self, X: np.ndarray, y: np.ndarray):
+        """训练模型（LUT不需要传统训练）"""
+        # LUT直接从数据创建，不需要此方法
         pass
 
     def predict(self, X: np.ndarray) -> np.ndarray:
+        """
+        预测校正值
+
+        Parameters:
+        -----------
+        X : np.ndarray
+            输入特征，shape=(n_samples, n_features)
+
+        Returns:
+        --------
+        np.ndarray
+            预测的误差值
+        """
         if self.interpolator is None:
             raise ValueError("模型尚未训练")
 
+        # 使用线性插值
         predictions = self.interpolator(X)
-        nan_mask = np.isnan(predictions)
 
+        # 对插值失败的点使用最近邻插值
+        nan_mask = np.isnan(predictions)
         if nan_mask.any():
             self.logger.warning(f"{nan_mask.sum()} 个点插值失败，使用最近邻插值")
             predictions[nan_mask] = self.nn_interpolator(X[nan_mask])
@@ -126,6 +210,7 @@ class LUTCorrectionModel(CorrectionModel):
         return predictions
 
     def save(self, filepath: Path):
+        """保存LUT模型"""
         save_data = {
             'grid_points': self.grid_points,
             'lut_values': self.lut_values,
@@ -133,12 +218,14 @@ class LUTCorrectionModel(CorrectionModel):
             'metadata': self.metadata
         }
 
+        # 保存为npz文件
         np.savez_compressed(
             filepath,
             **{k: (v if k != 'grid_points' else {key: val for key, val in v.items()})
                for k, v in save_data.items() if k != 'grid_points'}
         )
 
+        # 单独保存grid_points（因为npz不能直接保存嵌套字典）
         grid_points_file = filepath.parent / f"{filepath.stem}_grid.json"
         with open(grid_points_file, 'w') as f:
             json.dump({k: v.tolist() for k, v in self.grid_points.items()}, f)
@@ -146,17 +233,24 @@ class LUTCorrectionModel(CorrectionModel):
         self.logger.info(f"LUT模型已保存: {filepath}")
 
     def load(self, filepath: Path):
+        """加载LUT模型"""
+        # 加载主数据
         data = np.load(filepath, allow_pickle=True)
+
         self.lut_values = data['lut_values']
         self.dimensions = data['dimensions'].tolist()
         self.metadata = data['metadata'].item()
 
+        # 加载grid_points
         grid_points_file = filepath.parent / f"{filepath.stem}_grid.json"
         with open(grid_points_file, 'r') as f:
             grid_dict = json.load(f)
 
         self.grid_points = {k: np.array(v) for k, v in grid_dict.items()}
+
+        # 重新创建插值器
         self._create_interpolator()
+
         self.logger.info(f"LUT模型已加载: {filepath}")
 
 
@@ -164,32 +258,54 @@ class AnalyticalCorrectionModel(CorrectionModel):
     """解析校正模型"""
 
     def __init__(self, formula_type: str = 'secz_linear', logger=None):
+        """
+        初始化解析模型
+
+        Parameters:
+        -----------
+        formula_type : str
+            公式类型 ('secz_linear', 'secz_poly', 'angle_poly')
+        """
         super().__init__('analytical', logger)
         self.formula_type = formula_type
         self.coefficients = None
         self.formula_func = None
 
     def _secz_linear_formula(self, X: np.ndarray, *coeffs) -> np.ndarray:
+        """sec(z)线性公式"""
+        # X: [secz_sza, secz_vza, ...]
         return coeffs[0] * X[:, 0] + coeffs[1] * X[:, 1] + coeffs[2]
 
     def _secz_poly_formula(self, X: np.ndarray, *coeffs) -> np.ndarray:
+        """sec(z)多项式公式"""
         secz_sza = X[:, 0]
         secz_vza = X[:, 1]
+
+        # 公式: a*secz_sza + b*secz_vza + c*secz_sza^2 + d*secz_vza^2 + e*secz_sza*secz_vza + f
         return (coeffs[0] * secz_sza + coeffs[1] * secz_vza +
                 coeffs[2] * secz_sza ** 2 + coeffs[3] * secz_vza ** 2 +
                 coeffs[4] * secz_sza * secz_vza + coeffs[5])
 
     def _angle_poly_formula(self, X: np.ndarray, *coeffs) -> np.ndarray:
+        """角度多项式公式"""
         sza = X[:, 0]
         vza = X[:, 1]
+        raa = X[:, 2]
+
+        # 转换为弧度
         sza_rad = np.radians(sza)
         vza_rad = np.radians(vza)
+        raa_rad = np.radians(raa)
 
-        return (coeffs[0] * sza_rad + coeffs[1] * vza_rad +
-                coeffs[2] * sza_rad ** 2 + coeffs[3] * vza_rad ** 2 +
-                coeffs[4] * sza_rad * vza_rad + coeffs[5])
+        # 二阶多项式
+        return (coeffs[0] * sza_rad + coeffs[1] * vza_rad + coeffs[2] * raa_rad +
+                coeffs[3] * sza_rad ** 2 + coeffs[4] * vza_rad ** 2 + coeffs[5] * raa_rad ** 2 +
+                coeffs[6] * sza_rad * vza_rad + coeffs[7] * sza_rad * raa_rad + coeffs[8] * vza_rad * raa_rad +
+                coeffs[9])
 
     def fit(self, X: np.ndarray, y: np.ndarray):
+        """训练模型"""
+        # 移除NaN值
         valid_mask = ~(np.isnan(X).any(axis=1) | np.isnan(y))
         X_valid = X[valid_mask]
         y_valid = y[valid_mask]
@@ -198,23 +314,26 @@ class AnalyticalCorrectionModel(CorrectionModel):
             self.logger.warning("有效数据点不足，无法训练模型")
             return
 
+        # 选择公式
         if self.formula_type == 'secz_linear':
-            p0 = [0.01, 0.01, 0.0]
+            p0 = [0.01, 0.01, 0.0]  # 初始猜测
             formula = self._secz_linear_formula
         elif self.formula_type == 'secz_poly':
             p0 = [0.01, 0.01, 0.001, 0.001, 0.001, 0.0]
             formula = self._secz_poly_formula
         elif self.formula_type == 'angle_poly':
-            p0 = [0.01] * 5 + [0.0]
+            p0 = [0.01] * 9 + [0.0]
             formula = self._angle_poly_formula
         else:
             raise ValueError(f"不支持的公式类型: {self.formula_type}")
 
         try:
+            # 拟合参数
             coeffs, _ = curve_fit(formula, X_valid, y_valid, p0=p0, maxfev=5000)
             self.coefficients = coeffs
             self.formula_func = lambda X_pred: formula(X_pred, *coeffs)
 
+            # 计算R²
             y_pred = self.predict(X_valid)
             ss_res = np.sum((y_valid - y_pred) ** 2)
             ss_tot = np.sum((y_valid - np.mean(y_valid)) ** 2)
@@ -235,26 +354,34 @@ class AnalyticalCorrectionModel(CorrectionModel):
             raise
 
     def predict(self, X: np.ndarray) -> np.ndarray:
+        """预测校正值"""
         if self.formula_func is None:
             raise ValueError("模型尚未训练")
+
         return self.formula_func(X)
 
     def save(self, filepath: Path):
+        """保存模型"""
         save_data = {
             'formula_type': self.formula_type,
             'coefficients': self.coefficients,
             'metadata': self.metadata
         }
+
         joblib.dump(save_data, filepath)
         self.logger.info(f"解析模型已保存: {filepath}")
 
     def load(self, filepath: Path):
+        """加载模型"""
         data = joblib.load(filepath)
+
         self.formula_type = data['formula_type']
         self.coefficients = data['coefficients']
         self.metadata = data['metadata']
 
+        # 重新创建公式函数
         coeffs = self.coefficients
+
         if self.formula_type == 'secz_linear':
             self.formula_func = lambda X: self._secz_linear_formula(X, *coeffs)
         elif self.formula_type == 'secz_poly':
@@ -270,15 +397,34 @@ class ModelFactory:
 
     @staticmethod
     def create_model(model_type: str, **kwargs) -> CorrectionModel:
+        """
+        创建校正模型
+
+        Parameters:
+        -----------
+        model_type : str
+            模型类型 ('lut', 'linear', 'polynomial', 'ml')
+        **kwargs : dict
+            模型特定参数
+
+        Returns:
+        --------
+        CorrectionModel
+            创建的模型
+        """
         if model_type == 'lut':
-            dimensions = kwargs.get('dimensions', ['sza', 'vza', 'aod550'])
+            dimensions = kwargs.get('dimensions', ['sza', 'vza', 'raa', 'aod550'])
             return LUTCorrectionModel(dimensions=dimensions)
+
         elif model_type == 'linear':
             return AnalyticalCorrectionModel(formula_type='secz_linear')
+
         elif model_type == 'polynomial':
             formula_type = kwargs.get('formula_type', 'secz_poly')
             return AnalyticalCorrectionModel(formula_type=formula_type)
+
         elif model_type == 'ml':
+            # 可以扩展为机器学习模型
             from sklearn.ensemble import RandomForestRegressor
 
             class MLCorrectionModel(CorrectionModel):
@@ -303,6 +449,7 @@ class ModelFactory:
                     self.model = joblib.load(filepath)
 
             return MLCorrectionModel(**kwargs.get('model_kwargs', {}))
+
         else:
             raise ValueError(f"不支持的模型类型: {model_type}")
 
@@ -311,22 +458,54 @@ class ModelTrainer:
     """模型训练器"""
 
     def __init__(self, config: ExperimentConfig, logger=None):
+        """
+        初始化模型训练器
+
+        Parameters:
+        -----------
+        config : ExperimentConfig
+            实验配置
+        logger : logging.Logger, optional
+            日志记录器
+        """
         self.config = config
         self.logger = logger or setup_logger('ModelTrainer')
         self.models = {}
 
     def prepare_training_data(self, data: pd.DataFrame, band_id: str = 'band3',
-                              features: List[str] = None) -> Tuple[np.ndarray, np.ndarray, List[str]]:
+                              features: List[str] = None) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        准备训练数据
+
+        Parameters:
+        -----------
+        data : pd.DataFrame
+            原始数据
+        band_id : str
+            波段ID
+        features : list
+            特征列名
+
+        Returns:
+        --------
+        tuple
+            (X, y) 特征矩阵和目标值
+        """
+        # 筛选波段数据
         band_data = data[data['band'] == band_id].copy()
 
+        # 默认特征
         if features is None:
-            features = ['sza', 'vza', 'aod550', 'rho_true']
+            features = ['sza', 'vza', 'raa', 'aod550', 'rho_true']
 
+        # 计算sec(z)
         band_data['secz_sza'] = calculate_airmass(band_data['sza'])
         band_data['secz_vza'] = calculate_airmass(band_data['vza'])
 
+        # 选择特征
         available_features = [f for f in features if f in band_data.columns]
 
+        # 移除无效值
         valid_mask = (
                 band_data['error_absolute'].notna() &
                 ~band_data[available_features].isna().any(axis=1)
@@ -337,6 +516,7 @@ class ModelTrainer:
         if len(band_data_valid) == 0:
             raise ValueError("没有有效训练数据")
 
+        # 提取特征和目标
         X = band_data_valid[available_features].values
         y = band_data_valid['error_absolute'].values
 
@@ -346,29 +526,53 @@ class ModelTrainer:
 
     def train_model(self, data: pd.DataFrame, band_id: str = 'band3',
                     model_type: str = 'lut', model_name: str = None, **kwargs):
+        """
+        训练校正模型
+
+        Parameters:
+        -----------
+        data : pd.DataFrame
+            训练数据
+        band_id : str
+            波段ID
+        model_type : str
+            模型类型
+        model_name : str, optional
+            模型名称
+        **kwargs : dict
+            模型特定参数
+        """
         if model_name is None:
             model_name = f"{model_type}_{band_id}"
 
         self.logger.info(f"开始训练模型: {model_name} ({model_type})")
 
         try:
+            # 准备数据
             X, y, features = self.prepare_training_data(data, band_id, kwargs.get('features'))
+
+            # 创建并训练模型
             model = ModelFactory.create_model(model_type, **kwargs)
 
             if model_type == 'lut':
+                # LUT需要原始DataFrame
                 model.create_lut_from_data(data[data['band'] == band_id])
             else:
+                # 其他模型使用特征矩阵
                 model.fit(X, y)
 
+            # 评估模型
             y_pred = model.predict(X)
             mae = np.mean(np.abs(y - y_pred))
             rmse = np.sqrt(np.mean((y - y_pred) ** 2))
 
             self.logger.info(f"模型训练完成 - MAE: {mae:.6f}, RMSE: {rmse:.6f}")
 
+            # 保存模型
             model_file = self.config.MODELS_DIR / f"{model_name}.pkl"
             model.save(model_file)
 
+            # 保存评估结果
             eval_results = {
                 'model_name': model_name,
                 'model_type': model_type,
@@ -384,14 +588,26 @@ class ModelTrainer:
             with open(eval_file, 'w') as f:
                 json.dump(eval_results, f, indent=2)
 
+            # 保存到模型字典
             self.models[model_name] = model
+
             return model
 
         except Exception as e:
             self.logger.error(f"模型训练失败: {e}")
             raise
 
+    def train_all_bands(self, data: pd.DataFrame, model_type: str = 'lut', **kwargs):
+        """训练所有波段的模型"""
+        for band_id in self.config.BANDS.keys():
+            try:
+                model_name = f"{model_type}_{band_id}"
+                self.train_model(data, band_id, model_type, model_name, **kwargs)
+            except Exception as e:
+                self.logger.error(f"波段 {band_id} 训练失败: {e}")
+
     def compare_models(self, data: pd.DataFrame, band_id: str = 'band3'):
+        """比较不同模型"""
         model_types = ['lut', 'linear', 'polynomial']
         comparison_results = []
 
@@ -400,6 +616,7 @@ class ModelTrainer:
                 model_name = f"{model_type}_{band_id}"
                 model = self.train_model(data, band_id, model_type, model_name)
 
+                # 评估
                 X, y, _ = self.prepare_training_data(data, band_id)
                 y_pred = model.predict(X)
 
@@ -419,9 +636,13 @@ class ModelTrainer:
             except Exception as e:
                 self.logger.error(f"模型 {model_type} 比较失败: {e}")
 
+        # 创建比较DataFrame
         df_comparison = pd.DataFrame(comparison_results)
+
+        # 保存比较结果
         comp_file = self.config.MODELS_DIR / f"model_comparison_{band_id}.csv"
         df_comparison.to_csv(comp_file, index=False)
 
         self.logger.info(f"模型比较结果已保存: {comp_file}")
+
         return df_comparison
