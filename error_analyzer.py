@@ -507,9 +507,9 @@ class ErrorAnalyzer:
                     elif param == 'rho_true':
                         title_parts.append(f'ρ={fixed_params[param]}')
                     elif param == 'h2o':
-                        title_parts.append(f'H2O={fixed_params[param]}g/cm²')
+                        title_parts.append(f'H$_2$O={fixed_params[param]}g/cm$^2$')
                     elif param == 'o3':
-                        title_parts.append(f'O3={fixed_params[param]}cm-atm')
+                        title_parts.append(f'O$_3$={fixed_params[param]}cm-atm')
 
             ax.set_title('\n'.join(title_parts), fontsize=10)
 
@@ -642,9 +642,9 @@ class ErrorAnalyzer:
                 if param == 'rho_true':
                     title_parts.append(f'ρ={value}')
                 elif param == 'h2o':
-                    title_parts.append(f'H2O={value}g/cm²')
+                    title_parts.append(f'H$_2$O={value}g/cm$^2$')
                 elif param == 'o3':
-                    title_parts.append(f'O3={value}cm-atm')
+                    title_parts.append(f'O$_3$={value}cm-atm')
 
             ax.set_title('\n'.join(title_parts), fontsize=10)
 
@@ -715,9 +715,9 @@ class ErrorAnalyzer:
                 if param == 'aod550':
                     title_parts.append(f'AOD={value}')
                 elif param == 'h2o':
-                    title_parts.append(f'H2O={value}g/cm²')
+                    title_parts.append(f'H$_2$O={value}g/cm$^2$')
                 elif param == 'o3':
-                    title_parts.append(f'O3={value}cm-atm')
+                    title_parts.append(f'O$_3$={value}cm-atm')
 
             ax.set_title('\n'.join(title_parts), fontsize=10)
 
@@ -774,7 +774,7 @@ class ErrorAnalyzer:
             filtered_data = filtered_data[filtered_data['h2o'] == h2o_val]
 
             if len(filtered_data) < 10:
-                ax.text(0.5, 0.5, f'Insufficient data\nH2O={h2o_val}g/cm²',
+                ax.text(0.5, 0.5, f'Insufficient data\nH$_2$O={h2o_val}g/cm$^2$',
                         ha='center', va='center')
                 continue
 
@@ -783,14 +783,14 @@ class ErrorAnalyzer:
             band_name = ExperimentConfig.BANDS[band_id]['name']
 
             # 构建标题
-            title_parts = [band_name, f'H2O={h2o_val}g/cm²']
+            title_parts = [band_name, f'H$_2$O={h2o_val}g/cm$^2$']
             for param, value in fixed_params.items():
                 if param == 'aod550':
                     title_parts.append(f'AOD={value}')
                 elif param == 'rho_true':
                     title_parts.append(f'ρ={value}')
                 elif param == 'o3':
-                    title_parts.append(f'O3={value}cm-atm')
+                    title_parts.append(f'O$_3$={value}cm-atm')
 
             ax.set_title('\n'.join(title_parts), fontsize=10)
 
@@ -847,7 +847,7 @@ class ErrorAnalyzer:
             filtered_data = filtered_data[filtered_data['o3'] == o3_val]
 
             if len(filtered_data) < 10:
-                ax.text(0.5, 0.5, f'Insufficient data\nO3={o3_val}cm-atm',
+                ax.text(0.5, 0.5, f'Insufficient data\nO$_3$={o3_val}cm-atm',
                         ha='center', va='center')
                 continue
 
@@ -856,14 +856,14 @@ class ErrorAnalyzer:
             band_name = ExperimentConfig.BANDS[band_id]['name']
 
             # 构建标题
-            title_parts = [band_name, f'O3={o3_val}cm-atm']
+            title_parts = [band_name, f'O$_3$O$_3$={o3_val}cm-atm']
             for param, value in fixed_params.items():
                 if param == 'aod550':
                     title_parts.append(f'AOD={value}')
                 elif param == 'rho_true':
                     title_parts.append(f'ρ={value}')
                 elif param == 'h2o':
-                    title_parts.append(f'H2O={value}g/cm²')
+                    title_parts.append(f'H$_2$O={value}g/cm$^2$cm$^2$')
 
             ax.set_title('\n'.join(title_parts), fontsize=10)
 
