@@ -19,8 +19,9 @@ class ExperimentConfig:
     RESULTS_DIR = BASE_DIR / "results"
     FIGURES_DIR = BASE_DIR / "figures"
     MODELS_DIR = BASE_DIR / "models"
+    MANU_FIGURES_DIR = FIGURES_DIR / "Manu_figures"  # 新增：论文图表目录
 
-    for dir_path in [DATA_DIR, RESULTS_DIR, FIGURES_DIR, MODELS_DIR]:
+    for dir_path in [DATA_DIR, RESULTS_DIR, FIGURES_DIR, MODELS_DIR, MANU_FIGURES_DIR]:
         dir_path.mkdir(parents=True, exist_ok=True)
 
     BANDS = {
@@ -34,12 +35,12 @@ class ExperimentConfig:
 
     # 移除raa参数，固定为0
     PARAM_SPACE = {
-        'sza': np.arange(0, 86, 15),
-        'vza': np.arange(0, 76, 15),
-        'rho_true': [0.1, 0.2, 0.4],
-        'aod550': [0.1, 0.3, 0.5],
-        'h2o': [1.0, 2.0],
-        'o3': [0.2, 0.3],
+        'sza': np.arange(0, 86, 15),  # 0, 15, 30, 45, 60, 75°
+        'vza': np.arange(0, 76, 15),  # 0, 15, 30, 45, 60, 75°
+        'rho_true': [0.1, 0.2, 0.4],  # 低、中、高反射率
+        'aod550': [0.1, 0.2, 0.3],  # 清洁、中等、浑浊
+        'h2o': [1.0, 2.0],  # 水汽含量(g/cm²)
+        'o3': [0.2, 0.3],  # 臭氧含量(cm-atm)
         'atmos_profile': ['MidlatitudeSummer'],
         'aero_profile': ['Continental']
     }
@@ -72,6 +73,76 @@ class ExperimentConfig:
         'analyze_errors': True,
         'build_model': True,
         'validate': True
+    }
+
+    # 新增：论文图表配置
+    PAPER_FIGURES = {
+        # 基础固定参数配置（所有横截面共用的固定值）
+        'fixed_params': {
+            'aod550': 0.3,
+            'rho_true': 0.2,
+            'h2o': 2.0,  # 固定h2o
+            'o3': 0.3,  # 固定o3
+            'atmos_profile': 'MidlatitudeSummer',
+            'aero_profile': 'Continental'
+        },
+        'contour_fixed_all': {
+            'layout': (2, 3),  # 2行3列，6个波段
+            'figsize': (18, 12)
+        },
+        'contour_varying_aod': {
+            'rho_true': 0.2,
+            'h2o': 2.0,  # 固定h2o
+            'o3': 0.3,  # 固定o3
+            'aod550_values': [0.1, 0.3, 0.5],
+            'band': 'band3',
+            'layout': (1, 3),  # 1行3列
+            'figsize': (18, 6)
+        },
+        'contour_varying_rho': {
+            'aod550': 0.3,
+            'h2o': 2.0,  # 固定h2o
+            'o3': 0.3,  # 固定o3
+            'rho_true_values': [0.1, 0.2, 0.4],
+            'band': 'band3',
+            'layout': (1, 3),  # 1行3列
+            'figsize': (18, 6)
+        },
+        'contour_varying_h2o': {
+            'aod550': 0.3,
+            'rho_true': 0.2,
+            'o3': 0.3,  # 固定o3
+            'h2o_values': [1.0, 2.0],  # h2o只有2个值
+            'band': 'band3',
+            'layout': (1, 2),  # 1行2列
+            'figsize': (12, 6)
+        },
+        'contour_varying_o3': {
+            'aod550': 0.3,
+            'rho_true': 0.2,
+            'h2o': 2.0,  # 固定h2o
+            'o3_values': [0.2, 0.3],  # o3只有2个值
+            'band': 'band3',
+            'layout': (1, 2),  # 1行2列
+            'figsize': (12, 6)
+        },
+        'contour_varying_band': {
+            'aod550': 0.3,
+            'rho_true': 0.2,
+            'h2o': 2.0,  # 固定h2o
+            'o3': 0.3,  # 固定o3
+            'bands': ['band1', 'band2', 'band3', 'band4', 'band5', 'band6'],
+            'layout': (2, 3),  # 2行3列
+            'figsize': (18, 12)
+        },
+        'single_factor_sensitivity': {
+            'layout': (3, 4),  # 3行4列（共12个参数）
+            'figsize': (20, 15)
+        },
+        'error_distribution': {
+            'layout': (2, 3),  # 2行3列（共6个波段）
+            'figsize': (18, 12)
+        }
     }
 
     @classmethod
@@ -110,7 +181,7 @@ class ExperimentConfig:
                 'sza': 30.0,
                 'vza': 0.0,
                 'rho_true': 0.2,
-                'aod550': 0.3,
+                'aod550': 0.2,
                 'h2o': 2.0,
                 'o3': 0.3,
                 'atmos_profile': cls.PARAM_SPACE['atmos_profile'][0],
@@ -161,6 +232,32 @@ class ExperimentConfig:
                     params['sza'] = float(sza)
                     params['vza'] = float(vza)
                     param_list.append(params)
+
+        elif mode == 'paper_figures':  # 新增：论文图表模式
+            # 为论文图表生成完整数据
+            param_list = []
+            param_combinations = product(
+                cls.PARAM_SPACE['sza'],
+                cls.PARAM_SPACE['vza'],
+                cls.PARAM_SPACE['rho_true'],
+                cls.PARAM_SPACE['aod550'],
+                cls.PARAM_SPACE['h2o'],
+                cls.PARAM_SPACE['o3']
+            )
+
+            for sza, vza, rho_true, aod550, h2o, o3 in param_combinations:
+                param_dict = {
+                    'sza': float(sza),
+                    'vza': float(vza),
+                    'rho_true': float(rho_true),
+                    'aod550': float(aod550),
+                    'h2o': float(h2o),
+                    'o3': float(o3),
+                    'atmos_profile': cls.PARAM_SPACE['atmos_profile'][0],
+                    'aero_profile': cls.PARAM_SPACE['aero_profile'][0],
+                    'target_altitude': cls.SIXS_CONFIG['target_altitude']
+                }
+                param_list.append(param_dict)
 
         else:
             raise ValueError(f"不支持的实验模式: {mode}")

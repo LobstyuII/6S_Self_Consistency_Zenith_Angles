@@ -21,4 +21,12 @@ python main.py --phase analyze --band band1
 
 python recreate_data.py
 
-conda install -c conda-forge plotly
+# 方式1：使用现有数据生成论文图表
+python main.py --phase paper_figures --mode full --band all
+
+# 方式2：先生成数据，再生成论文图表
+python main.py --phase simulate --mode paper_figures --band all
+python main.py --phase paper_figures --mode full --band all --paper_figures_only
+
+# 方式3：单独运行论文图表生成器
+python paper_figures.py
