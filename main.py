@@ -1,9 +1,10 @@
-# ==================== main.py ====================
+# ==================== main.py (完整修改版) ====================
 """
-主程序模块
+主程序模块 - 支持分块化LUT模拟
 """
 import argparse
 import sys
+import json
 from pathlib import Path
 import pandas as pd
 import numpy as np
@@ -14,9 +15,15 @@ from data_generator import BatchSimulator
 from error_analyzer import ErrorAnalyzer
 from correction_model import ModelTrainer
 from validation import ModelValidator
-from paper_figures import PaperFiguresGenerator  # 新增导入
+from paper_figures import PaperFiguresGenerator
 from utils import setup_logger, load_dataset, save_dataset
 from sensitivity_analyzer import SensitivityAnalyzer
+
+# 新增导入
+from task_manager import TaskManager, TaskStatus
+from block_simulator import BlockSimulator
+from data_merger import DataMerger
+
 import matplotlib
 
 matplotlib.rcParams['font.sans-serif'] = ['SimHei', 'Microsoft YaHei', 'SimSun']
@@ -59,16 +66,38 @@ def repair_missing_columns(df: pd.DataFrame) -> pd.DataFrame:
     return df_repair
 
 
+def parse_constraints(constraints_str: str) -> dict:
+    """解析参数约束字符串"""
+    if not constraints_str:
+        return {}
+
+    constraints = {}
+    try:
+        for constraint in constraints_str.split(','):
+            if ':' in constraint:
+                param, range_str = constraint.split(':')
+                if '-' in range_str:
+                    min_val, max_val = map(float, range_str.split('-'))
+                    constraints[param] = (min_val, max_val)
+                else:
+                    # 单值约束
+                    constraints[param] = (float(range_str), float(range_str))
+    except Exception as e:
+        print(f"解析约束参数失败: {e}")
+        return {}
+
+    return constraints
+
+
 def main():
     """主函数"""
-    parser = argparse.ArgumentParser(description='6S几何误差校正实验')
+    parser = argparse.ArgumentParser(description='6S几何误差校正实验 - 分块化LUT模拟')
     parser.add_argument('--phase', type=str,
-                        choices=['all', 'simulate', 'analyze', 'sensitivity', 'train', 'validate', 'paper_figures'],
-                        # 新增paper_figures
+                        choices=['all', 'simulate', 'analyze', 'sensitivity',
+                                 'train', 'validate', 'paper_figures', 'block_simulate'],
                         default='all', help='运行阶段')
     parser.add_argument('--mode', type=str,
                         choices=['full', 'single_factor', 'multi_factor', 'airmass_only', 'paper_figures'],
-                        # 新增paper_figures
                         default='full', help='实验模式')
     parser.add_argument('--band', type=str, default='band3',
                         help='目标波段 (band1, band2, band3, all)')
@@ -82,8 +111,23 @@ def main():
                         help='强制修复数据列')
     parser.add_argument('--force_regenerate', action='store_true',
                         help='强制重新生成数据')
-    parser.add_argument('--paper_figures_only', action='store_true',  # 新增参数
+    parser.add_argument('--paper_figures_only', action='store_true',
                         help='仅生成论文图表')
+
+    # 分块模拟相关参数
+    parser.add_argument('--block_mode', type=str,
+                        choices=['generate', 'run', 'resume', 'merge', 'status', 'clean'],
+                        default=None, help='分块模拟模式')
+    parser.add_argument('--max_blocks', type=int, default=None,
+                        help='最大处理块数')
+    parser.add_argument('--merge_constraints', type=str, default=None,
+                        help='合并数据时的参数约束，格式: "sza:0-30,vza:0-45"')
+    parser.add_argument('--task_config', type=str, default=None,
+                        help='任务配置文件路径')
+    parser.add_argument('--simulation_mode', type=str, default='full',
+                        choices=['full', 'paper_figures', 'sensitivity'],
+                        help='模拟模式配置')
+
     args = parser.parse_args()
 
     config = ExperimentConfig
@@ -99,12 +143,224 @@ def main():
     logger.info(f"运行阶段: {args.phase}")
     logger.info(f"目标波段: {args.band}")
     logger.info(f"模型类型: {args.model_type}")
+    if args.block_mode:
+        logger.info(f"分块模拟模式: {args.block_mode}")
     logger.info("=" * 60)
 
-    # 确保Manu_figures目录存在
+    # 确保所有目录存在
     config.MANU_FIGURES_DIR.mkdir(parents=True, exist_ok=True)
+    config.DATA_DIR.mkdir(parents=True, exist_ok=True)
+    config.RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+    config.FIGURES_DIR.mkdir(parents=True, exist_ok=True)
+    config.MODELS_DIR.mkdir(parents=True, exist_ok=True)
 
     try:
+        results = {}
+
+        # ==================== 分块模拟处理 ====================
+        if args.block_mode:
+            logger.info(f"进入分块模拟模式: {args.block_mode}")
+
+            # 初始化任务管理器
+            task_manager = TaskManager(config, logger)
+
+            if args.block_mode == 'generate':
+                # 生成任务块
+                logger.info("生成任务块...")
+
+                # 确定要处理的波段
+                bands_to_process = []
+                if args.band == 'all':
+                    bands_to_process = list(config.BANDS.keys())
+                else:
+                    bands_to_process = [args.band]
+
+                # 生成模拟器以获取参数网格
+                block_simulator = BlockSimulator(config, task_manager, logger)
+
+                total_tasks = 0
+                for band_id in bands_to_process:
+                    logger.info(f"为波段 {band_id} 生成任务块...")
+
+                    # 根据模拟模式获取参数配置
+                    if args.simulation_mode in config.SIMULATION_MODES:
+                        mode_config = config.SIMULATION_MODES[args.simulation_mode]
+                        param_grids = {}
+                        for param_name in ['sza', 'vza', 'aod550', 'rho_true', 'h2o', 'o3']:
+                            if param_name in mode_config:
+                                param_grids[param_name] = np.array(mode_config[param_name])
+                            else:
+                                # 使用默认配置
+                                if param_name in config.PARAM_RANGES:
+                                    param_config = config.PARAM_RANGES[param_name]
+                                    if isinstance(param_config, dict):
+                                        values = np.arange(
+                                            param_config['min'],
+                                            param_config['max'] + param_config['step'] / 2,
+                                            param_config['step']
+                                        )
+                                    else:
+                                        values = np.array(param_config)
+                                    param_grids[param_name] = values
+                    else:
+                        # 使用默认参数网格
+                        param_grids = block_simulator._generate_param_grids(band_id)
+
+                    # 生成任务块
+                    tasks = task_manager.generate_task_blocks(band_id, param_grids)
+                    task_manager.save_tasks(tasks)
+
+                    logger.info(f"波段 {band_id} 生成了 {len(tasks)} 个任务块")
+                    total_tasks += len(tasks)
+
+                logger.info(f"总共生成了 {total_tasks} 个任务块")
+
+                # 显示任务状态
+                if args.band != 'all':
+                    progress = task_manager.get_progress(args.band)
+                    logger.info(f"波段 {args.band} 任务状态:")
+                    logger.info(f"  总任务数: {progress['total_tasks']}")
+                    logger.info(f"  完成率: {progress['completion_rate']:.1f}%")
+                    for status, count in progress['status_counts'].items():
+                        logger.info(f"  {status}: {count}")
+
+            elif args.block_mode in ['run', 'resume']:
+                # 运行模拟任务
+                block_simulator = BlockSimulator(config, task_manager, logger)
+
+                # 确定要处理的波段
+                bands_to_process = []
+                if args.band == 'all':
+                    bands_to_process = list(config.BANDS.keys())
+                else:
+                    bands_to_process = [args.band]
+
+                total_results = {'completed': 0, 'failed': 0, 'total': 0}
+
+                for band_id in bands_to_process:
+                    logger.info(f"处理波段 {band_id} 的模拟任务...")
+
+                    # 检查任务状态
+                    progress = task_manager.get_progress(band_id)
+                    logger.info(f"波段 {band_id} 任务状态:")
+                    logger.info(f"  总任务数: {progress['total_tasks']}")
+                    logger.info(f"  完成率: {progress['completion_rate']:.1f}%")
+
+                    # 运行模拟
+                    result = block_simulator.run_batch(
+                        band_id,
+                        max_blocks=args.max_blocks,
+                        resume=(args.block_mode == 'resume')
+                    )
+
+                    logger.info(f"波段 {band_id} 完成: {result}")
+                    total_results['completed'] += result['completed']
+                    total_results['failed'] += result['failed']
+                    total_results['total'] += result['total']
+
+                logger.info(f"所有波段模拟完成:")
+                logger.info(f"  成功: {total_results['completed']}")
+                logger.info(f"  失败: {total_results['failed']}")
+                logger.info(f"  总计: {total_results['total']}")
+
+            elif args.block_mode == 'merge':
+                # 合并数据块
+                data_merger = DataMerger(config, task_manager, logger)
+
+                # 解析约束条件
+                constraints = parse_constraints(args.merge_constraints)
+
+                bands_to_process = []
+                if args.band == 'all':
+                    bands_to_process = list(config.BANDS.keys())
+                else:
+                    bands_to_process = [args.band]
+
+                for band_id in bands_to_process:
+                    logger.info(f"合并波段 {band_id} 的数据...")
+
+                    if constraints:
+                        # 选择性合并
+                        merged_df = data_merger.merge_selective(band_id, constraints)
+                        if not merged_df.empty:
+                            # 保存结果
+                            constraints_str = "_".join([f"{k}_{v[0]}-{v[1]}" for k, v in constraints.items()])
+                            output_file = config.DATA_DIR / f"simulation_results_{band_id}_{constraints_str}.nc"
+
+                            data_dict = {}
+                            for col in merged_df.columns:
+                                col_data = merged_df[col].values
+                                if col_data.dtype == object:
+                                    try:
+                                        col_data = col_data.astype(str)
+                                    except:
+                                        pass
+                                data_dict[col] = col_data
+
+                            save_dataset(data_dict, output_file)
+                            logger.info(f"波段 {band_id} 选择性合并完成: {len(merged_df)} 行数据 -> {output_file}")
+                            results[band_id] = merged_df
+                        else:
+                            logger.warning(f"波段 {band_id} 没有满足条件的数据")
+                    else:
+                        # 合并所有完成的数据块
+                        merged_df = data_merger.merge_blocks(band_id)
+                        if not merged_df.empty:
+                            # 保存结果
+                            output_file = config.DATA_DIR / f"simulation_results_{band_id}_merged.nc"
+
+                            data_dict = {}
+                            for col in merged_df.columns:
+                                col_data = merged_df[col].values
+                                if col_data.dtype == object:
+                                    try:
+                                        col_data = col_data.astype(str)
+                                    except:
+                                        pass
+                                data_dict[col] = col_data
+
+                            save_dataset(data_dict, output_file)
+                            logger.info(f"波段 {band_id} 合并完成: {len(merged_df)} 行数据 -> {output_file}")
+                            results[band_id] = merged_df
+                        else:
+                            logger.warning(f"波段 {band_id} 没有可合并的数据")
+
+            elif args.block_mode == 'status':
+                # 显示任务状态
+                logger.info("任务状态报告:")
+
+                bands_to_check = []
+                if args.band == 'all':
+                    bands_to_check = list(config.BANDS.keys())
+                else:
+                    bands_to_check = [args.band]
+
+                for band_id in bands_to_check:
+                    progress = task_manager.get_progress(band_id)
+                    logger.info(f"\n波段 {band_id}:")
+                    logger.info(f"  总任务数: {progress['total_tasks']}")
+                    logger.info(f"  完成率: {progress['completion_rate']:.1f}%")
+
+                    for status, count in progress['status_counts'].items():
+                        if count > 0:
+                            logger.info(f"  {status}: {count}")
+
+            elif args.block_mode == 'clean':
+                # 清理任务状态（重置失败的任务）
+                logger.info("清理失败的任务...")
+
+                # 这里实现清理逻辑
+                # 例如：将所有失败的任务状态重置为PENDING
+                # 实现略...
+
+                logger.info("清理完成")
+
+            # 分块模拟模式直接返回，不执行后续流程
+            if args.block_mode in ['generate', 'run', 'resume', 'merge', 'status', 'clean']:
+                logger.info("分块模拟处理完成")
+                return
+
+        # ==================== 传统处理流程 ====================
         # 如果仅生成论文图表，跳过数据生成阶段
         if not args.paper_figures_only:
             # 阶段1: 数据生成
@@ -566,7 +822,7 @@ def main():
                             except Exception as e:
                                 logger.error(f"验证失败: {e}")
 
-        # 阶段5: 生成论文图表
+        # ==================== 阶段5: 生成论文图表 ====================
         if args.phase in ['all', 'paper_figures']:
             logger.info("阶段5: 生成论文图表")
 

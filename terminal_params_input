@@ -30,3 +30,19 @@ python main.py --phase paper_figures --mode full --band all --paper_figures_only
 
 # 方式3：单独运行论文图表生成器
 python paper_figures.py
+
+
+# 1. 生成任务块
+python main.py --phase block_simulate --block_mode generate --band band3
+
+# 2. 运行模拟（从头开始）
+python main.py --phase block_simulate --block_mode run --band band3 --max_blocks 50
+
+# 3. 恢复模拟（继续运行）
+python main.py --phase block_simulate --block_mode resume --band band3
+
+# 4. 合并数据
+python main.py --phase block_simulate --block_mode merge --band band3
+
+# 5. 选择性合并（如只要sza<30的数据）
+python main.py --phase block_simulate --block_mode merge --band band3 --merge_constraints "sza:0-30"

@@ -7,6 +7,37 @@ from pathlib import Path
 from datetime import datetime
 
 
+class LUTTaskConfig:
+    """LUT任务配置"""
+
+    # 参数分块配置
+    PARAM_BLOCKS = {
+        'sza': {'size': 5, 'overlap': 1},  # 每5度一个块，重叠1度
+        'vza': {'size': 5, 'overlap': 1},
+        'aod550': {'size': 0.1, 'overlap': 0.02},
+        'rho_true': {'size': 0.05, 'overlap': 0.01},
+        'h2o': {'size': 0.5, 'overlap': 0.1},
+        'o3': {'size': 0.01, 'overlap': 0.002}
+    }
+
+    # 任务管理
+    TASK_MANAGEMENT = {
+        'task_db_file': 'tasks.db',  # 任务状态数据库
+        'max_retries': 3,  # 最大重试次数
+        'chunk_size': 100,  # 每个任务块的大小
+        'checkpoint_interval': 100,  # 检查点间隔
+        'backup_interval': 1000,  # 备份间隔
+    }
+
+    # 数据存储
+    DATA_STORAGE = {
+        'block_format': 'netcdf',  # 块数据格式
+        'merge_format': 'netcdf',  # 合并数据格式
+        'compress_blocks': True,  # 压缩块数据
+        'keep_blocks': True,  # 保留块数据
+    }
+
+
 class ExperimentConfig:
     """实验配置参数"""
 
@@ -33,16 +64,35 @@ class ExperimentConfig:
         'band6': {'wavelength': 2.3, 'name': 'Himawari-AHI Band 6 (2.3um)'}
     }
 
-    # 移除raa参数，固定为0
-    PARAM_SPACE = {
-        'sza': np.arange(0, 86, 15),  # 0, 15, 30, 45, 60, 75°
-        'vza': np.arange(0, 76, 15),  # 0, 15, 30, 45, 60, 75°
-        'rho_true': [0.1, 0.2, 0.4],  # 低、中、高反射率
-        'aod550': [0.1, 0.2, 0.3],  # 清洁、中等、浑浊
-        'h2o': [1.0, 2.0],  # 水汽含量(g/cm²)
-        'o3': [0.2, 0.3],  # 臭氧含量(cm-atm)
-        'atmos_profile': ['MidlatitudeSummer'],
-        'aero_profile': ['Continental']
+    # 参数范围配置 - 支持灵活定义
+    PARAM_RANGES = {
+        'sza': {'min': 0.0, 'max': 85.0, 'step': 5.0},  # 动态生成
+        'vza': {'min': 0.0, 'max': 75.0, 'step': 5.0},
+        'aod550': [0.05, 0.1, 0.2, 0.3, 0.5, 1.0],  # 预设值
+        'rho_true': {'min': 0.05, 'max': 0.5, 'step': 0.05},
+        'h2o': [0.5, 1.0, 2.0, 3.0, 4.0, 5.0],
+        'o3': [0.2, 0.25, 0.3, 0.35, 0.4],
+    }
+
+    # 新增：模拟模式配置
+    SIMULATION_MODES = {
+        'full': {'use_all_params': True},
+        'paper_figures': {
+            'sza': [0, 30, 60],
+            'vza': [0, 30, 60],
+            'aod550': [0.05, 0.2, 0.5],
+            'rho_true': [0.05, 0.2, 0.4],
+            'h2o': [1.0, 2.0],
+            'o3': [0.25, 0.35]
+        },
+        'sensitivity': {
+            'sza': [0, 30, 60],
+            'vza': [0, 30, 60],
+            'aod550': [0.1, 0.3],
+            'rho_true': [0.1, 0.3],
+            'h2o': [1.0, 3.0],
+            'o3': [0.25, 0.35]
+        }
     }
 
     SIXS_CONFIG = {
