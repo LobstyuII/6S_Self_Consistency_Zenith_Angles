@@ -103,8 +103,11 @@ class ExperimentConfig:
     }
 
     PARALLEL_CONFIG = {
-        'n_workers': 8,
-        'chunk_size': 100,
+        'n_workers': 8,  # 使用物理核心数的一半或更少
+        'max_concurrent_6s': 4,  # 同时运行的6S实例数限制
+        'use_shared_memory': True,
+        'shared_memory_size': 1024 * 1024 * 100,  # 100MB共享内存
+        'chunk_size': 1000,  # 每个进程处理的任务块大小
         'use_cache': True,
         'cache_dir': DATA_DIR / "cache"
     }

@@ -36,13 +36,27 @@ python paper_figures.py
 python main.py --phase block_simulate --block_mode generate --band band3
 
 # 2. 运行模拟（从头开始）
-python main.py --phase block_simulate --block_mode run --band band3 --max_blocks 50
+python main.py --phase block_simulate --block_mode run --band band6 --max_blocks 50
 
 # 3. 恢复模拟（继续运行）
-python main.py --phase block_simulate --block_mode resume --band band3
+python main.py --phase block_simulate --block_mode resume --band band6
 
 # 4. 合并数据
 python main.py --phase block_simulate --block_mode merge --band band3
 
 # 5. 选择性合并（如只要sza<30的数据）
 python main.py --phase block_simulate --block_mode merge --band band3 --merge_constraints "sza:0-30"
+
+
+# 快速测试 - 只处理band3的1000个组合
+python main.py --block_mode run_parallel --band band3 --n_workers 4
+
+# 全量处理 - 所有波段
+python main.py --block_mode run_parallel --band all --n_workers 8
+
+# 指定波段和处理数量
+python main.py --block_mode run_parallel --band band6 --n_workers 6
+
+
+
+

@@ -9,6 +9,7 @@ from pathlib import Path
 import pandas as pd
 import numpy as np
 import logging
+import time
 
 from config import ExperimentConfig
 from data_generator import BatchSimulator
@@ -18,11 +19,10 @@ from validation import ModelValidator
 from paper_figures import PaperFiguresGenerator
 from utils import setup_logger, load_dataset, save_dataset
 from sensitivity_analyzer import SensitivityAnalyzer
-
-# 新增导入
 from task_manager import TaskManager, TaskStatus
 from block_simulator import BlockSimulator
 from data_merger import DataMerger
+from parallel_simulator import ParallelBlockSimulator
 
 import matplotlib
 
@@ -116,7 +116,8 @@ def main():
 
     # 分块模拟相关参数
     parser.add_argument('--block_mode', type=str,
-                        choices=['generate', 'run', 'resume', 'merge', 'status', 'clean'],
+                        choices=['generate', 'run', 'resume', 'merge', 'status',
+                                 'clean', 'run_parallel'],
                         default=None, help='分块模拟模式')
     parser.add_argument('--max_blocks', type=int, default=None,
                         help='最大处理块数')
@@ -263,6 +264,91 @@ def main():
                 logger.info(f"  失败: {total_results['failed']}")
                 logger.info(f"  总计: {total_results['total']}")
 
+            elif args.block_mode == 'run_parallel':
+                # 使用并行模拟器
+                logger.info("使用并行模拟器加速处理...")
+
+                # 创建并行模拟器
+                from parallel_simulator import ParallelBlockSimulator
+                parallel_simulator = ParallelBlockSimulator(config, logger)
+
+                # 确定要处理的波段
+                bands_to_process = []
+                if args.band == 'all':
+                    bands_to_process = list(config.BANDS.keys())
+                else:
+                    bands_to_process = [args.band]
+
+                # 获取所有参数组合
+                logger.info("生成所有参数组合...")
+                all_combinations = parallel_simulator.generate_all_param_combinations()
+
+                # 转换为任务块格式
+                task_blocks = []
+                total_combinations = 0
+
+                for band_id in bands_to_process:
+                    if band_id in all_combinations:
+                        param_list = all_combinations[band_id]
+                        total_combinations += len(param_list)
+
+                        # 分批处理，每批chunk_size个参数组合
+                        chunk_size = config.PARALLEL_CONFIG.get('chunk_size', 1000)
+                        for i in range(0, len(param_list), chunk_size):
+                            chunk = param_list[i:i + chunk_size]
+                            task_blocks.append((band_id, chunk))
+
+                logger.info(f"准备处理 {len(task_blocks)} 个任务块，共 {total_combinations} 个参数组合")
+
+                # 设置工作进程数
+                if args.n_workers:
+                    n_workers = args.n_workers
+                else:
+                    # 使用物理核心数的一半，但不超过配置的最大值
+                    import multiprocessing as mp
+                    physical_cores = mp.cpu_count() // 2
+                    max_concurrent = config.PARALLEL_CONFIG.get('max_concurrent_6s', 4)
+                    n_workers = min(physical_cores, max_concurrent)
+
+                # 运行并行模拟
+                start_time = time.time()
+                results = parallel_simulator.simulate_blocks_parallel(
+                    task_blocks,
+                    max_workers=n_workers
+                )
+                elapsed_time = time.time() - start_time
+
+                # 保存结果
+                total_samples = 0
+                for band_id, df in results.items():
+                    if len(df) > 0:
+                        output_file = config.DATA_DIR / f"simulation_results_{band_id}_parallel.nc"
+
+                        data_dict = {}
+                        for col in df.columns:
+                            col_data = df[col].values
+                            if col_data.dtype == object:
+                                try:
+                                    col_data = col_data.astype(str)
+                                except:
+                                    pass
+                            data_dict[col] = col_data
+
+                        save_dataset(data_dict, output_file)
+                        logger.info(f"波段 {band_id}: 保存 {len(df)} 个样本到 {output_file}")
+                        total_samples += len(df)
+
+                # 汇总统计
+                logger.info("=" * 60)
+                logger.info(f"并行模拟完成!")
+                logger.info(f"总耗时: {elapsed_time:.2f} 秒")
+                logger.info(f"总样本数: {total_samples}")
+                logger.info(f"平均速度: {total_samples / elapsed_time:.2f} 样本/秒")
+                logger.info(f"工作进程数: {n_workers}")
+                logger.info("=" * 60)
+
+                # 并行模式直接返回
+                return
             elif args.block_mode == 'merge':
                 # 合并数据块
                 data_merger = DataMerger(config, task_manager, logger)
