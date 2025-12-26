@@ -22,7 +22,7 @@ from sensitivity_analyzer import SensitivityAnalyzer
 from task_manager import TaskManager, TaskStatus
 from block_simulator import BlockSimulator
 from data_merger import DataMerger
-from parallel_simulator import ParallelBlockSimulator
+from parallel_simulator import ParallelBlockSimulatorImproved
 
 import matplotlib
 
@@ -264,58 +264,86 @@ def main():
                 logger.info(f"  失败: {total_results['failed']}")
                 logger.info(f"  总计: {total_results['total']}")
 
+
             elif args.block_mode == 'run_parallel':
-                # 使用并行模拟器
-                logger.info("使用并行模拟器加速处理...")
 
-                # 创建并行模拟器
-                from parallel_simulator import ParallelBlockSimulator
-                parallel_simulator = ParallelBlockSimulator(config, logger)
+                # 使用改进的并行模拟器
 
-                # 确定要处理的波段
-                bands_to_process = []
-                if args.band == 'all':
-                    bands_to_process = list(config.BANDS.keys())
-                else:
-                    bands_to_process = [args.band]
+                logger.info("使用改进的并行模拟器...")
 
-                # 获取所有参数组合
-                logger.info("生成所有参数组合...")
-                all_combinations = parallel_simulator.generate_all_param_combinations()
+                # 创建改进的并行模拟器
+
+                from parallel_simulator import ParallelBlockSimulatorImproved
+
+                parallel_simulator = ParallelBlockSimulatorImproved(config, logger)
+
+                # 生成参数组合（与单线程保持一致）
+
+                logger.info("生成参数组合（与单线程保持一致）...")
+
+                all_combinations = parallel_simulator.generate_all_param_combinations_consistent(args.mode)
 
                 # 转换为任务块格式
+
                 task_blocks = []
+
                 total_combinations = 0
 
+                if args.band == 'all':
+
+                    bands_to_process = list(config.BANDS.keys())
+
+                else:
+
+                    bands_to_process = [args.band]
+
                 for band_id in bands_to_process:
+
                     if band_id in all_combinations:
+
                         param_list = all_combinations[band_id]
+
                         total_combinations += len(param_list)
 
                         # 分批处理，每批chunk_size个参数组合
+
                         chunk_size = config.PARALLEL_CONFIG.get('chunk_size', 1000)
+
                         for i in range(0, len(param_list), chunk_size):
                             chunk = param_list[i:i + chunk_size]
+
                             task_blocks.append((band_id, chunk))
 
                 logger.info(f"准备处理 {len(task_blocks)} 个任务块，共 {total_combinations} 个参数组合")
 
                 # 设置工作进程数
+
                 if args.n_workers:
+
                     n_workers = args.n_workers
+
                 else:
-                    # 使用物理核心数的一半，但不超过配置的最大值
+
                     import multiprocessing as mp
+
                     physical_cores = mp.cpu_count() // 2
+
                     max_concurrent = config.PARALLEL_CONFIG.get('max_concurrent_6s', 4)
+
                     n_workers = min(physical_cores, max_concurrent)
 
-                # 运行并行模拟
+                # 运行改进的并行模拟
+
                 start_time = time.time()
-                results = parallel_simulator.simulate_blocks_parallel(
+
+                results = parallel_simulator.simulate_blocks_parallel_improved(
+
                     task_blocks,
+
                     max_workers=n_workers
+
                 )
+
                 elapsed_time = time.time() - start_time
 
                 # 保存结果

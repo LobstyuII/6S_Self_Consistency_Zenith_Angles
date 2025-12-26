@@ -1,9 +1,9 @@
 # ==================== parallel_simulator.py ====================
 """
 并行模拟器 - 使用多进程共享内存高效运行6S模拟
+参考6S+BRDF.py成功模式进行重构
 """
 import multiprocessing as mp
-from multiprocessing import shared_memory
 from concurrent.futures import ProcessPoolExecutor, as_completed
 import numpy as np
 import pandas as pd
@@ -13,280 +13,311 @@ import time
 import gc
 import traceback
 from Py6S import *
-from tqdm import tqdm  # 添加tqdm导入
+from tqdm import tqdm
 
 from config import ExperimentConfig
-from utils import setup_logger, calculate_airmass
+from utils import setup_logger
 import multiprocessing
 
+# 设置多进程启动方法
 multiprocessing.set_start_method('spawn', force=True)
 
 
 class SixSProcessWorker:
-    """6S进程工作器 - 在独立进程中运行6S"""
+    """6S进程工作器 - 参考6S+BRDF.py设计，每个任务创建新实例"""
 
     def __init__(self, band_wavelength: float):
         self.band_wavelength = band_wavelength
-        self.sixs_instance = None
-        self._init_sixs()
+        self._precompute_atmos_profiles()
 
-    def _init_sixs(self):
-        """初始化6S实例"""
+    def _precompute_atmos_profiles(self):
+        """预计算大气廓线映射"""
+        self.atmos_profile_map = {
+            'MidlatitudeSummer': AtmosProfile.PredefinedType(AtmosProfile.MidlatitudeSummer),
+            'MidlatitudeWinter': AtmosProfile.PredefinedType(AtmosProfile.MidlatitudeWinter),
+            'Tropical': AtmosProfile.PredefinedType(AtmosProfile.Tropical),
+            'SubarcticSummer': AtmosProfile.PredefinedType(AtmosProfile.SubarcticSummer),
+            'SubarcticWinter': AtmosProfile.PredefinedType(AtmosProfile.SubarcticWinter),
+        }
+
+        self.aero_profile_map = {
+            'Continental': AeroProfile.PredefinedType(AeroProfile.Continental),
+            'Maritime': AeroProfile.PredefinedType(AeroProfile.Maritime),
+            'Urban': AeroProfile.PredefinedType(AeroProfile.Urban),
+            'Desert': AeroProfile.PredefinedType(AeroProfile.Desert),
+            'BiomassBurning': AeroProfile.PredefinedType(AeroProfile.BiomassBurning),
+        }
+
+    def create_sixs_instance(self, params: Dict[str, float]) -> SixS:
+        """
+        创建并配置6S实例 - 参考6S+BRDF.py中每个任务创建新实例
+        """
         try:
-            self.sixs_instance = SixS()
-            self.sixs_instance.wavelength = Wavelength(self.band_wavelength)
-            self.sixs_instance.altitudes.set_target_custom_altitude(0.0)
-            self.sixs_instance.altitudes.set_sensor_satellite_level()
-            self.sixs_instance.ground_reflectance = GroundReflectance.HomogeneousLambertian(0.2)
-            self.sixs_instance.atmos_corr = AtmosCorr.NoAtmosCorr()
-        except Exception as e:
-            print(f"初始化6S失败: {e}")
-            self.sixs_instance = None
+            s = SixS()
+            s.wavelength = Wavelength(self.band_wavelength)
 
-    def run_simulation(self, params: Dict[str, float]) -> Dict[str, float]:
-        """运行单个模拟"""
-        if self.sixs_instance is None:
-            return {'success': False, 'error': '6S实例未初始化'}
+            # 配置大气廓线
+            atmos_key = params.get('atmos_profile', 'MidlatitudeSummer')
 
-        try:
-            # 配置几何参数
-            self.sixs_instance.geometry = Geometry.User()
-            self.sixs_instance.geometry.solar_z = params['sza']
-            self.sixs_instance.geometry.solar_a = 0.0
-            self.sixs_instance.geometry.view_z = params['vza']
-            self.sixs_instance.geometry.view_a = 0.0
-
-            # 配置大气参数
+            # 检查是否有自定义水汽和臭氧
             if 'h2o' in params and 'o3' in params:
                 water = params['h2o']
                 ozone = params['o3']
-                self.sixs_instance.atmos_profile = AtmosProfile.UserWaterAndOzone(water, ozone)
+                if not np.isnan(water) and not np.isnan(ozone) and water > 0 and ozone > 0:
+                    s.atmos_profile = AtmosProfile.UserWaterAndOzone(water, ozone)
+                else:
+                    s.atmos_profile = self.atmos_profile_map.get(atmos_key)
             else:
-                self.sixs_instance.atmos_profile = AtmosProfile.PredefinedType(AtmosProfile.MidlatitudeSummer)
+                s.atmos_profile = self.atmos_profile_map.get(atmos_key)
 
             # 配置气溶胶
-            self.sixs_instance.aero_profile = AeroProfile.PredefinedType(AeroProfile.Continental)
+            aero_key = params.get('aero_profile', 'Continental')
+            s.aero_profile = self.aero_profile_map.get(aero_key)
+
+            # 设置气溶胶光学厚度
             if 'aod550' in params:
-                self.sixs_instance.aot550 = params['aod550']
+                aod_val = params['aod550']
+                if not np.isnan(aod_val) and aod_val >= 0:
+                    s.aot550 = aod_val
+                else:
+                    s.aot550 = 0.2  # 默认值
+            else:
+                s.aot550 = 0.2  # 默认值
+
+            # 配置几何参数
+            s.geometry = Geometry.User()
+            s.geometry.solar_z = params['sza']
+            s.geometry.solar_a = 0.0  # 固定太阳方位角
+            s.geometry.view_z = params['vza']
+            s.geometry.view_a = 0.0  # 固定观测方位角
+
+            # 配置高度
+            s.altitudes = Altitudes()
+            s.altitudes.set_target_custom_altitude(params.get('target_altitude', 0.0))
+            s.altitudes.set_sensor_satellite_level()
+
+            return s
+
+        except Exception as e:
+            print(f"创建6S实例失败: {e}")
+            return None
+
+    def run_forward_simulation(self, params: Dict[str, float]) -> Dict[str, Any]:
+        """运行正向模拟"""
+        try:
+            # 创建新的6S实例
+            s = self.create_sixs_instance(params)
+            if s is None:
+                return {
+                    'success': False,
+                    'error': '创建6S实例失败',
+                    **params
+                }
 
             # 配置地表反射率
-            if 'rho_true' in params:
-                self.sixs_instance.ground_reflectance = GroundReflectance.HomogeneousLambertian(params['rho_true'])
+            rho_true = params.get('rho_true', 0.2)
+            s.ground_reflectance = GroundReflectance.HomogeneousLambertian(rho_true)
+            s.atmos_corr = AtmosCorr.NoAtmosCorr()
 
             # 运行正向模拟
-            self.sixs_instance.run()
-            rho_toa = self.sixs_instance.outputs.values['apparent_reflectance']
+            s.run()
+            rho_toa = s.outputs.values['apparent_reflectance']
 
-            # 运行反演
-            self.sixs_instance.atmos_corr = AtmosCorr.AtmosCorrLambertianFromReflectance(rho_toa)
+            # 计算空气质量
+            sza = params['sza']
+            vza = params['vza']
+            cos_sza = np.cos(np.radians(sza)) if sza < 88 else 0.0349
+            cos_vza = np.cos(np.radians(vza)) if vza < 88 else 0.0349
+            airmass_sza = 1.0 / cos_sza if cos_sza > 0.01 else 1.0 / 0.01
+            airmass_vza = 1.0 / cos_vza if cos_vza > 0.01 else 1.0 / 0.01
+
+            # 清理实例
+            del s
+            gc.collect()
+
+            return {
+                'success': True,
+                'rho_true': rho_true,
+                'rho_toa': rho_toa,
+                'airmass_sza': airmass_sza,
+                'airmass_vza': airmass_vza,
+                'total_airmass': airmass_sza + airmass_vza
+            }
+
+        except Exception as e:
+            error_msg = f"正向模拟失败: {str(e)}"
+            return {
+                'success': False,
+                'error': error_msg,
+                **params
+            }
+
+    def run_inversion(self, rho_toa: float, params: Dict[str, float]) -> Dict[str, Any]:
+        """运行反演模拟"""
+        try:
+            # 创建新的6S实例
+            s = self.create_sixs_instance(params)
+            if s is None:
+                return {
+                    'success': False,
+                    'error': '创建6S实例失败',
+                    **params
+                }
+
+            # 配置反演
+            s.atmos_corr = AtmosCorr.AtmosCorrLambertianFromReflectance(rho_toa)
+
+            # 运行反演模拟
+            s.run()
+            rho_retrieved = s.outputs.values['pixel_reflectance']
+
+            # 清理实例
+            del s
+            gc.collect()
+
+            return {
+                'success': True,
+                'rho_toa_input': rho_toa,
+                'rho_retrieved': rho_retrieved
+            }
+
+        except Exception as e:
+            error_msg = f"反演模拟失败: {str(e)}"
+            return {
+                'success': False,
+                'error': error_msg,
+                **params
+            }
+
+    def run_closed_loop(self, params: Dict[str, float]) -> Dict[str, Any]:
+        """
+        运行闭合循环模拟 - 参考6S+BRDF.py模式
+        """
+        try:
+            # 1. 正向模拟
+            forward_result = self.run_forward_simulation(params)
+
+            if not forward_result.get('success', False):
+                return {
+                    **forward_result,
+                    'closed_loop_success': False,
+                    **params
+                }
+
+            # 2. 反演模拟（移除rho_true参数）
             inv_params = {k: v for k, v in params.items() if k != 'rho_true'}
+            inversion_result = self.run_inversion(forward_result['rho_toa'], inv_params)
 
-            # 重新配置反演的参数
-            self.sixs_instance.geometry = Geometry.User()
-            self.sixs_instance.geometry.solar_z = inv_params.get('sza', params['sza'])
-            self.sixs_instance.geometry.solar_a = 0.0
-            self.sixs_instance.geometry.view_z = inv_params.get('vza', params['vza'])
-            self.sixs_instance.geometry.view_a = 0.0
+            if not inversion_result.get('success', False):
+                return {
+                    **forward_result,
+                    **inversion_result,
+                    'closed_loop_success': False,
+                    **params
+                }
 
-            if 'h2o' in inv_params and 'o3' in inv_params:
-                self.sixs_instance.atmos_profile = AtmosProfile.UserWaterAndOzone(
-                    inv_params['h2o'], inv_params['o3']
-                )
-
-            self.sixs_instance.run()
-            rho_retrieved = self.sixs_instance.outputs.values['pixel_reflectance']
-
-            error_abs = rho_retrieved - params.get('rho_true', 0.2)
+            # 3. 计算误差
+            error_abs = inversion_result['rho_retrieved'] - params.get('rho_true', 0.2)
             rho_true = params.get('rho_true', 0.2)
             error_rel = error_abs / rho_true if rho_true > 0 else np.nan
 
             return {
-                'success': True,
-                'rho_true': params.get('rho_true', 0.2),
-                'rho_toa': rho_toa,
-                'rho_retrieved': rho_retrieved,
+                **forward_result,
+                **inversion_result,
                 'error_absolute': error_abs,
                 'error_relative': error_rel,
+                'closed_loop_success': True,
+                'success': True,
                 'sza': params['sza'],
                 'vza': params['vza'],
                 'aod550': params.get('aod550', 0.2),
                 'h2o': params.get('h2o', np.nan),
                 'o3': params.get('o3', np.nan),
-                'airmass_sza': calculate_airmass(params['sza']),
-                'airmass_vza': calculate_airmass(params['vza'])
-            }
-
-        except Exception as e:
-            return {
-                'success': False,
-                'error': str(e),
                 **params
             }
 
-    def cleanup(self):
-        """清理资源"""
-        del self.sixs_instance
-        gc.collect()
+        except Exception as e:
+            error_msg = f"闭合循环模拟失败: {str(e)}"
+            return {
+                'success': False,
+                'error': error_msg,
+                'closed_loop_success': False,
+                **params
+            }
 
 
-class SharedMemoryManager:
-    """共享内存管理器"""
-
-    def __init__(self, config: ExperimentConfig):
-        self.config = config
-        self.shared_buffers = {}
-
-    def create_shared_array(self, name: str, shape: tuple, dtype: np.dtype):
-        """创建共享数组"""
-        size = int(np.prod(shape) * np.dtype(dtype).itemsize)
-
-        try:
-            # 尝试连接现有的共享内存
-            shm = shared_memory.SharedMemory(name=name, create=False)
-        except FileNotFoundError:
-            # 创建新的共享内存
-            shm = shared_memory.SharedMemory(name=name, create=True, size=size)
-
-        array = np.ndarray(shape, dtype=dtype, buffer=shm.buf)
-        self.shared_buffers[name] = (shm, array)
-        return array
-
-    def get_shared_array(self, name: str):
-        """获取共享数组"""
-        if name in self.shared_buffers:
-            return self.shared_buffers[name][1]
-        return None
-
-    def cleanup(self):
-        """清理所有共享内存"""
-        for name, (shm, _) in self.shared_buffers.items():
-            shm.close()
-            try:
-                shm.unlink()
-            except:
-                pass
-
-
-def worker_process(task_batch: Tuple[str, List[Dict]],
-                   result_shm_name: str,
-                   progress_shm_name: str,
-                   config_dict: Dict) -> Dict:
+def worker_process_improved(task_batch: Tuple[str, List[Dict]], config_dict: Dict) -> Tuple[str, List[Dict]]:
     """
-    工作进程函数 - 在独立进程中运行
+    改进的工作进程函数 - 参考6S+BRDF.py设计
     """
     import numpy as np
+    import gc
 
     band_id, param_list = task_batch
     band_config = config_dict['bands'][band_id]
     wavelength = band_config['wavelength']
 
-    # 连接共享内存
-    result_shm = shared_memory.SharedMemory(name=result_shm_name)
-    progress_shm = shared_memory.SharedMemory(name=progress_shm_name)
-
-    # 获取结果数组和进度数组
-    n_tasks = len(param_list)
-    result_shape = (n_tasks, 15)  # 15个输出字段
-    result_array = np.ndarray(result_shape, dtype=np.float32, buffer=result_shm.buf)
-    progress_array = np.ndarray((2,), dtype=np.int32, buffer=progress_shm.buf)  # [已完成, 失败数]
-
-    # 初始化6S工作器
+    # 创建工作器
     worker = SixSProcessWorker(wavelength)
 
-    completed = 0
-    failed = 0
+    results = []
 
     for i, params in enumerate(param_list):
         try:
-            result = worker.run_simulation(params)
+            # 运行模拟
+            result = worker.run_closed_loop(params)
 
-            if result['success']:
-                # 填充结果到共享数组
-                result_array[i, 0] = result['sza']
-                result_array[i, 1] = result['vza']
-                result_array[i, 2] = result.get('aod550', 0.2)
-                result_array[i, 3] = result.get('rho_true', 0.2)
-                result_array[i, 4] = result.get('h2o', np.nan)
-                result_array[i, 5] = result.get('o3', np.nan)
-                result_array[i, 6] = result['rho_toa']
-                result_array[i, 7] = result['rho_retrieved']
-                result_array[i, 8] = result['error_absolute']
-                result_array[i, 9] = result.get('error_relative', np.nan)
-                result_array[i, 10] = result['airmass_sza']
-                result_array[i, 11] = result['airmass_vza']
-                result_array[i, 12] = 1.0  # success flag
-                result_array[i, 13] = float(i)  # 原始索引
-                result_array[i, 14] = float(ord(band_id[-1]))  # 波段ID编码
-                completed += 1
-            else:
-                # 标记为失败
-                result_array[i, 12] = 0.0
-                result_array[i, 13] = float(i)
-                result_array[i, 14] = float(ord(band_id[-1]))
-                failed += 1
+            # 添加波段信息
+            result['band'] = band_id
+            result['wavelength'] = wavelength
+
+            results.append(result)
+
+            # 定期清理内存
+            if i % 100 == 0:
+                gc.collect()
 
         except Exception as e:
-            # 标记为失败
-            result_array[i, 12] = 0.0
-            result_array[i, 13] = float(i)
-            result_array[i, 14] = float(ord(band_id[-1]))
-            failed += 1
+            # 记录失败的任务
+            error_result = {
+                'band': band_id,
+                'success': False,
+                'error': str(e),
+                'closed_loop_success': False,
+                **params
+            }
+            results.append(error_result)
 
-        # 更新进度
-        progress_array[0] = completed
-        progress_array[1] = failed
+    # 最终清理
+    del worker
+    gc.collect()
 
-    # 清理
-    worker.cleanup()
-    result_shm.close()
-    progress_shm.close()
-
-    return {'band_id': band_id, 'completed': completed, 'failed': failed, 'total': n_tasks}
+    return band_id, results
 
 
-class ParallelBlockSimulator:
-    """并行分块模拟器"""
+class ParallelBlockSimulatorImproved:
+    """改进的并行分块模拟器"""
 
     def __init__(self, config: ExperimentConfig, logger=None):
         self.config = config
-        self.logger = logger or setup_logger('ParallelBlockSimulator')
-        self.shm_manager = SharedMemoryManager(config)
+        self.logger = logger or setup_logger('ParallelBlockSimulatorImproved')
 
-        # 预计算每个波段的6S工作器
-        self.workers = {}
-
-    def simulate_blocks_parallel(self,
-                                 task_blocks: List[Tuple[str, List[Dict]]],
-                                 max_workers: int = None) -> Dict[str, pd.DataFrame]:
-        """并行模拟多个任务块"""
+    def simulate_blocks_parallel_improved(self,
+                                          task_blocks: List[Tuple[str, List[Dict]]],
+                                          max_workers: int = None) -> Dict[str, pd.DataFrame]:
+        """
+        改进的并行模拟方法
+        """
+        from concurrent.futures import ProcessPoolExecutor, as_completed
 
         if max_workers is None:
-            # 使用物理核心数的一半，但不超过配置的最大值
+            import multiprocessing as mp
             physical_cores = mp.cpu_count() // 2
             max_workers = min(physical_cores,
                               self.config.PARALLEL_CONFIG.get('max_concurrent_6s', 4))
 
         self.logger.info(f"开始并行模拟，使用 {max_workers} 个工作进程")
 
-        # 准备任务批次
-        task_batches = self._prepare_task_batches(task_blocks, max_workers)
-
-        # 创建共享内存用于结果和进度
-        shm_names = {}
-        for i, (band_id, param_list) in enumerate(task_batches):
-            n_tasks = len(param_list)
-            result_shm_name = f"results_{band_id}_{i}"
-            progress_shm_name = f"progress_{band_id}_{i}"
-
-            # 创建结果共享内存
-            result_shape = (n_tasks, 15)
-            self.shm_manager.create_shared_array(result_shm_name, result_shape, np.float32)
-
-            # 创建进度共享内存
-            self.shm_manager.create_shared_array(progress_shm_name, (2,), np.int32)
-
-            shm_names[(band_id, i)] = (result_shm_name, progress_shm_name)
-
         # 准备配置字典（可序列化）
         config_dict = {
             'bands': self.config.BANDS,
@@ -294,301 +325,181 @@ class ParallelBlockSimulator:
         }
 
         # 使用进程池执行
-        results = {}
+        results_by_band = {}
         start_time = time.time()
 
         with ProcessPoolExecutor(max_workers=max_workers) as executor:
-            futures = []
-
-            for i, (band_id, param_list) in enumerate(task_batches):
-                result_shm_name, progress_shm_name = shm_names[(band_id, i)]
-
-                future = executor.submit(
-                    worker_process,
-                    (band_id, param_list),
-                    result_shm_name,
-                    progress_shm_name,
-                    config_dict
-                )
-                futures.append((band_id, future))
+            # 提交所有任务
+            future_to_batch = {
+                executor.submit(worker_process_improved, batch, config_dict): batch
+                for batch in task_blocks
+            }
 
             # 收集结果
-            for band_id, future in futures:
-                try:
-                    result = future.result(timeout=3600)  # 1小时超时
-                    self.logger.info(f"波段 {band_id} 完成: {result}")
-
-                    # 从共享内存获取数据
-                    result_shm_name, progress_shm_name = shm_names.get((band_id, 0), (None, None))
-                    if result_shm_name:
-                        result_array = self.shm_manager.get_shared_array(result_shm_name)
-
-                        # 转换为DataFrame
-                        df = self._array_to_dataframe(result_array, band_id)
-                        results[band_id] = df
-
-                except Exception as e:
-                    self.logger.error(f"波段 {band_id} 处理失败: {e}")
-
-        elapsed_time = time.time() - start_time
-        self.logger.info(f"并行模拟完成，耗时: {elapsed_time:.2f}秒")
-
-        # 清理共享内存
-        self.shm_manager.cleanup()
-
-        return results
-
-    def simulate_blocks_parallel_with_progress(self,
-                                               task_blocks: List[Tuple[str, List[Dict]]],
-                                               max_workers: int = None,
-                                               total_combinations: int = None) -> Dict[str, pd.DataFrame]:
-        """
-        并行模拟多个任务块（带进度条）
-
-        Args:
-            task_blocks: 任务块列表
-            max_workers: 最大工作进程数
-            total_combinations: 总参数组合数（用于进度条）
-
-        Returns:
-            各波段的结果字典
-        """
-        from concurrent.futures import ProcessPoolExecutor, as_completed
-
-        if max_workers is None:
-            # 使用物理核心数的一半，但不超过配置的最大值
-            import multiprocessing as mp
-            physical_cores = mp.cpu_count() // 2
-            max_workers = min(physical_cores,
-                              self.config.PARALLEL_CONFIG.get('max_concurrent_6s', 4))
-
-        self.logger.info(f"开始并行模拟（带进度条），使用 {max_workers} 个工作进程")
-
-        # 准备任务批次
-        task_batches = self._prepare_task_batches(task_blocks, max_workers)
-
-        # 创建共享内存用于结果和进度
-        shm_names = {}
-        for i, (band_id, param_list) in enumerate(task_batches):
-            n_tasks = len(param_list)
-            result_shm_name = f"results_{band_id}_{i}"
-            progress_shm_name = f"progress_{band_id}_{i}"
-
-            # 创建结果共享内存
-            result_shape = (n_tasks, 15)
-            self.shm_manager.create_shared_array(result_shm_name, result_shape, np.float32)
-
-            # 创建进度共享内存
-            self.shm_manager.create_shared_array(progress_shm_name, (2,), np.int32)
-
-            shm_names[(band_id, i)] = (result_shm_name, progress_shm_name)
-
-        # 准备配置字典（可序列化）
-        config_dict = {
-            'bands': self.config.BANDS,
-            'param_ranges': self.config.PARAM_RANGES
-        }
-
-        # 使用进程池执行
-        results = {}
-        start_time = time.time()
-
-        # 计算总任务数用于进度条
-        if total_combinations is None:
-            total_combinations = sum(len(param_list) for _, param_list in task_blocks)
-
-        with ProcessPoolExecutor(max_workers=max_workers) as executor:
-            futures = {}
-
-            # 提交所有任务
-            for i, (band_id, param_list) in enumerate(task_batches):
-                result_shm_name, progress_shm_name = shm_names[(band_id, i)]
-
-                future = executor.submit(
-                    worker_process,
-                    (band_id, param_list),
-                    result_shm_name,
-                    progress_shm_name,
-                    config_dict
-                )
-                futures[future] = (band_id, i, result_shm_name, progress_shm_name)
-
-            # 创建进度条
-            completed_samples = 0
-            with tqdm(total=total_combinations, desc="并行模拟", unit="样本",
-                      bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]") as pbar:
-
-                # 处理完成的任务
-                for future in as_completed(futures):
-                    band_id, batch_idx, result_shm_name, progress_shm_name = futures[future]
-
+            total_batches = len(task_blocks)
+            with tqdm(total=total_batches, desc="并行模拟", unit="批次") as pbar:
+                for future in as_completed(future_to_batch):
                     try:
-                        result = future.result(timeout=3600)  # 1小时超时
+                        band_id, batch_results = future.result(timeout=3600)
 
-                        # 更新进度条
-                        completed_samples += result['completed'] + result['failed']
-                        pbar.update(result['completed'] + result['failed'])
+                        # 合并结果
+                        if band_id not in results_by_band:
+                            results_by_band[band_id] = []
 
-                        # 从共享内存获取数据
-                        if result_shm_name:
-                            result_array = self.shm_manager.get_shared_array(result_shm_name)
+                        results_by_band[band_id].extend(batch_results)
 
-                            # 转换为DataFrame
-                            df = self._array_to_dataframe(result_array, band_id)
+                        # 统计成功和失败的样本
+                        success_count = sum(1 for r in batch_results if r.get('success', False))
+                        total_count = len(batch_results)
 
-                            # 合并到结果中
-                            if band_id not in results:
-                                results[band_id] = df
-                            else:
-                                results[band_id] = pd.concat([results[band_id], df], ignore_index=True)
-
-                        # 清理共享内存
-                        try:
-                            shm = shared_memory.SharedMemory(name=result_shm_name)
-                            shm.close()
-                            shm.unlink()
-                        except:
-                            pass
-
-                        try:
-                            shm = shared_memory.SharedMemory(name=progress_shm_name)
-                            shm.close()
-                            shm.unlink()
-                        except:
-                            pass
+                        pbar.update(1)
+                        pbar.set_postfix_str(f"{band_id}: {success_count}/{total_count}")
 
                     except Exception as e:
-                        self.logger.error(f"任务块 {band_id}_{batch_idx} 处理失败: {e}")
+                        self.logger.error(f"任务批次处理失败: {e}")
+                        traceback.print_exc()
+                        pbar.update(1)
 
         elapsed_time = time.time() - start_time
 
+        # 转换为DataFrame
+        final_results = {}
+        total_samples = 0
+        total_success = 0
+
+        for band_id, result_list in results_by_band.items():
+            if result_list:
+                df = pd.DataFrame(result_list)
+                final_results[band_id] = df
+                total_samples += len(df)
+
+                # 统计成功样本
+                if 'success' in df.columns:
+                    success_count = df['success'].sum() if df['success'].dtype == bool else (df['success'] == 1).sum()
+                    total_success += success_count
+
+                self.logger.info(f"波段 {band_id}: 处理了 {len(df)} 个样本")
+
         # 计算统计信息
-        total_samples = sum(len(df) for df in results.values())
-        success_rate = total_samples / total_combinations * 100 if total_combinations > 0 else 0
+        total_params = sum(len(params) for _, params in task_blocks)
+        success_rate = (total_success / total_params) * 100 if total_params > 0 else 0
 
         self.logger.info(f"并行模拟完成，耗时: {elapsed_time:.2f}秒")
-        self.logger.info(f"总样本数: {total_samples}/{total_combinations} ({success_rate:.1f}%)")
-        self.logger.info(f"平均速度: {total_samples / elapsed_time:.2f} 样本/秒")
+        self.logger.info(f"总样本数: {total_samples} (成功率: {success_rate:.1f}%)")
+        if elapsed_time > 0:
+            self.logger.info(f"平均速度: {total_samples / elapsed_time:.2f} 样本/秒")
 
-        # 清理共享内存管理器
-        self.shm_manager.cleanup()
+        return final_results
 
-        return results
-
-    def _prepare_task_batches(self,
-                              task_blocks: List[Tuple[str, List[Dict]]],
-                              max_workers: int) -> List[Tuple[str, List[Dict]]]:
-        """准备任务批次，确保每个批次大小合适"""
-        task_batches = []
-        chunk_size = self.config.PARALLEL_CONFIG.get('chunk_size', 1000)
-
-        for band_id, param_list in task_blocks:
-            # 按chunk_size分割参数列表
-            for i in range(0, len(param_list), chunk_size):
-                chunk = param_list[i:i + chunk_size]
-                task_batches.append((band_id, chunk))
-
-        # 重新平衡批次，使每个工作进程负载均衡
-        if len(task_batches) > max_workers * 2:
-            # 合并小批次
-            merged_batches = []
-            current_batch = []
-            current_size = 0
-
-            for band_id, param_list in task_batches:
-                if current_size + len(param_list) <= chunk_size * 2:
-                    current_batch.extend([(band_id, params) for params in param_list])
-                    current_size += len(param_list)
-                else:
-                    if current_batch:
-                        # 按波段分组合并
-                        band_groups = {}
-                        for b_id, params in current_batch:
-                            if b_id not in band_groups:
-                                band_groups[b_id] = []
-                            band_groups[b_id].append(params)
-
-                        for b_id, params_list in band_groups.items():
-                            merged_batches.append((b_id, params_list))
-
-                    current_batch = [(band_id, params) for params in param_list]
-                    current_size = len(param_list)
-
-            if current_batch:
-                band_groups = {}
-                for b_id, params in current_batch:
-                    if b_id not in band_groups:
-                        band_groups[b_id] = []
-                    band_groups[b_id].append(params)
-
-                for b_id, params_list in band_groups.items():
-                    merged_batches.append((b_id, params_list))
-
-            task_batches = merged_batches
-
-        return task_batches
-
-    def _array_to_dataframe(self, array: np.ndarray, band_id: str) -> pd.DataFrame:
-        """将numpy数组转换为DataFrame"""
-        df = pd.DataFrame({
-            'sza': array[:, 0],
-            'vza': array[:, 1],
-            'aod550': array[:, 2],
-            'rho_true': array[:, 3],
-            'h2o': array[:, 4],
-            'o3': array[:, 5],
-            'rho_toa': array[:, 6],
-            'rho_retrieved': array[:, 7],
-            'error_absolute': array[:, 8],
-            'error_relative': array[:, 9],
-            'airmass_sza': array[:, 10],
-            'airmass_vza': array[:, 11],
-            'success': array[:, 12] > 0.5,
-            'original_idx': array[:, 13].astype(int),
-            'band': band_id,
-            'wavelength': self.config.BANDS[band_id]['wavelength']
-        })
-
-        # 过滤成功的结果
-        df = df[df['success']].drop(columns=['success', 'original_idx'])
-
-        return df
-
-    def generate_all_param_combinations(self) -> Dict[str, List[Dict]]:
-        """生成所有参数组合"""
+    def generate_all_param_combinations_consistent(self, mode: str = 'full') -> Dict[str, List[Dict]]:
+        """
+        生成与单线程一致的所有参数组合
+        解决单线程432000 vs 多线程518400的差异
+        """
         from itertools import product
 
         param_grids = {}
         param_configs = self.config.PARAM_RANGES
 
-        # 生成参数网格
-        for param_name, config in param_configs.items():
-            if isinstance(config, dict):
-                values = np.arange(
-                    config['min'],
-                    config['max'] + config['step'] / 2,
-                    config['step']
-                )
-            else:
-                values = np.array(config)
-            param_grids[param_name] = values
+        # 生成参数网格 - 与单线程的get_param_combinations保持一致
+        if mode == 'full':
+            # 使用与单线程相同的参数范围
+            for param_name, config in param_configs.items():
+                if isinstance(config, dict):
+                    # 动态生成值 - 确保范围一致
+                    min_val = config['min']
+                    max_val = config['max']
+                    step = config['step']
+
+                    # 生成值，确保不超出范围
+                    values = np.arange(min_val, max_val + step / 2, step)
+                    # 确保最大值不超过配置的max
+                    values = values[values <= max_val]
+
+                    param_grids[param_name] = values
+                    self.logger.debug(f"参数 {param_name}: {len(values)} 个值, 范围: {min(values)}-{max(values)}")
+                else:
+                    # 使用预设值
+                    values = np.array(config)
+                    param_grids[param_name] = values
+                    self.logger.debug(f"参数 {param_name}: {len(values)} 个预设值")
+        elif mode == 'paper_figures':
+            # 使用论文图表模式的参数
+            mode_config = self.config.SIMULATION_MODES.get('paper_figures', {})
+            for param_name in ['sza', 'vza', 'aod550', 'rho_true', 'h2o', 'o3']:
+                if param_name in mode_config:
+                    param_grids[param_name] = np.array(mode_config[param_name])
+                elif param_name in param_configs:
+                    config = param_configs[param_name]
+                    if isinstance(config, dict):
+                        values = np.arange(config['min'], config['max'] + config['step'] / 2, config['step'])
+                        param_grids[param_name] = values
+                    else:
+                        param_grids[param_name] = np.array(config)
+
+        # 检查关键参数的组合数
+        if 'sza' in param_grids and 'vza' in param_grids:
+            sza_count = len(param_grids['sza'])
+            vza_count = len(param_grids['vza'])
+            self.logger.info(f"SZA: {sza_count}个值, VZA: {vza_count}个值")
 
         # 生成所有波段的所有参数组合
         all_combinations = {}
 
         for band_id in self.config.BANDS.keys():
-            param_names = list(param_grids.keys())
-            value_lists = [param_grids[name] for name in param_names]
+            # 选择要组合的参数
+            param_names = ['sza', 'vza', 'rho_true', 'aod550', 'h2o', 'o3']
+            value_lists = [param_grids.get(name, []) for name in param_names]
+
+            # 检查是否有空列表
+            if any(len(lst) == 0 for lst in value_lists):
+                self.logger.warning(f"波段 {band_id}: 某些参数值为空")
+                continue
 
             combinations = []
+
+            # 使用product生成所有组合
             for values in product(*value_lists):
                 params = dict(zip(param_names, values))
+                # 添加固定参数
+                params.update({
+                    'atmos_profile': 'MidlatitudeSummer',
+                    'aero_profile': 'Continental',
+                    'target_altitude': self.config.SIXS_CONFIG['target_altitude']
+                })
                 combinations.append(params)
 
             all_combinations[band_id] = combinations
-            self.logger.info(f"波段 {band_id}: 生成 {len(combinations)} 个参数组合")
 
-        total_combinations = sum(len(c) for c in all_combinations.values())
-        self.logger.info(f"总共生成 {total_combinations} 个参数组合")
+            # 计算理论组合数
+            theoretical_count = 1
+            for values in value_lists:
+                theoretical_count *= len(values)
+
+            self.logger.info(f"波段 {band_id}: 生成 {len(combinations)} 个参数组合 (理论值: {theoretical_count})")
+
+            # 调试输出前几个组合
+            if len(combinations) > 0 and self.logger.level == 'DEBUG':
+                for i in range(min(3, len(combinations))):
+                    self.logger.debug(f"  组合 {i + 1}: {combinations[i]}")
 
         return all_combinations
+
+
+# 保留原始类用于向后兼容
+class ParallelBlockSimulator:
+    """原始并行分块模拟器（向后兼容）"""
+
+    def __init__(self, config: ExperimentConfig, logger=None):
+        self.config = config
+        self.logger = logger or setup_logger('ParallelBlockSimulator')
+        # 创建改进版本的实例
+        self.improved_simulator = ParallelBlockSimulatorImproved(config, logger)
+
+    def simulate_blocks_parallel(self, task_blocks, max_workers=None):
+        """向后兼容的模拟方法"""
+        return self.improved_simulator.simulate_blocks_parallel_improved(task_blocks, max_workers)
+
+    def generate_all_param_combinations(self):
+        """向后兼容的参数生成方法"""
+        return self.improved_simulator.generate_all_param_combinations_consistent('full')

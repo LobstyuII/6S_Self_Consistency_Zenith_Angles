@@ -58,5 +58,7 @@ python main.py --block_mode run_parallel --band all --n_workers 8
 python main.py --block_mode run_parallel --band band6 --n_workers 6
 
 
+python batch_parallel.py --band band6 --chunk_size 100 --n_workers 2
+
 
 
