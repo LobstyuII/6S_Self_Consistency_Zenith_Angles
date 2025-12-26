@@ -7,6 +7,7 @@ import sys
 from pathlib import Path
 import time
 import pandas as pd
+from tqdm import tqdm  # 添加tqdm导入
 
 from config import ExperimentConfig
 from parallel_simulator import ParallelBlockSimulator
@@ -25,6 +26,8 @@ def main():
                         help='最大参数组合数（用于测试）')
     parser.add_argument('--output_dir', type=str, default=None,
                         help='输出目录')
+    parser.add_argument('--show_progress', action='store_true', default=True,
+                        help='显示进度条')  # 添加进度条参数
 
     args = parser.parse_args()
 
@@ -71,10 +74,32 @@ def main():
 
     # 运行并行模拟
     start_time = time.time()
-    results = parallel_simulator.simulate_blocks_parallel(
-        task_blocks,
-        max_workers=args.n_workers
-    )
+
+    if args.show_progress:
+        # 带进度条的并行模拟
+        logger.info("开始并行模拟（带进度条）...")
+
+        # 检查是否有带进度条的方法
+        if hasattr(parallel_simulator, 'simulate_blocks_parallel_with_progress'):
+            results = parallel_simulator.simulate_blocks_parallel_with_progress(
+                task_blocks,
+                max_workers=args.n_workers,
+                total_combinations=total_combinations
+            )
+        else:
+            # 如果不存在带进度条的方法，使用原始方法
+            logger.warning("进度条功能不可用，使用普通并行模式")
+            results = parallel_simulator.simulate_blocks_parallel(
+                task_blocks,
+                max_workers=args.n_workers
+            )
+    else:
+        # 原始并行模拟
+        results = parallel_simulator.simulate_blocks_parallel(
+            task_blocks,
+            max_workers=args.n_workers
+        )
+
     elapsed_time = time.time() - start_time
 
     # 保存结果

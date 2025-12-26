@@ -13,6 +13,7 @@ import time
 import gc
 import traceback
 from Py6S import *
+from tqdm import tqdm  # 添加tqdm导入
 
 from config import ExperimentConfig
 from utils import setup_logger, calculate_airmass
@@ -333,6 +334,143 @@ class ParallelBlockSimulator:
         self.logger.info(f"并行模拟完成，耗时: {elapsed_time:.2f}秒")
 
         # 清理共享内存
+        self.shm_manager.cleanup()
+
+        return results
+
+    def simulate_blocks_parallel_with_progress(self,
+                                               task_blocks: List[Tuple[str, List[Dict]]],
+                                               max_workers: int = None,
+                                               total_combinations: int = None) -> Dict[str, pd.DataFrame]:
+        """
+        并行模拟多个任务块（带进度条）
+
+        Args:
+            task_blocks: 任务块列表
+            max_workers: 最大工作进程数
+            total_combinations: 总参数组合数（用于进度条）
+
+        Returns:
+            各波段的结果字典
+        """
+        from concurrent.futures import ProcessPoolExecutor, as_completed
+
+        if max_workers is None:
+            # 使用物理核心数的一半，但不超过配置的最大值
+            import multiprocessing as mp
+            physical_cores = mp.cpu_count() // 2
+            max_workers = min(physical_cores,
+                              self.config.PARALLEL_CONFIG.get('max_concurrent_6s', 4))
+
+        self.logger.info(f"开始并行模拟（带进度条），使用 {max_workers} 个工作进程")
+
+        # 准备任务批次
+        task_batches = self._prepare_task_batches(task_blocks, max_workers)
+
+        # 创建共享内存用于结果和进度
+        shm_names = {}
+        for i, (band_id, param_list) in enumerate(task_batches):
+            n_tasks = len(param_list)
+            result_shm_name = f"results_{band_id}_{i}"
+            progress_shm_name = f"progress_{band_id}_{i}"
+
+            # 创建结果共享内存
+            result_shape = (n_tasks, 15)
+            self.shm_manager.create_shared_array(result_shm_name, result_shape, np.float32)
+
+            # 创建进度共享内存
+            self.shm_manager.create_shared_array(progress_shm_name, (2,), np.int32)
+
+            shm_names[(band_id, i)] = (result_shm_name, progress_shm_name)
+
+        # 准备配置字典（可序列化）
+        config_dict = {
+            'bands': self.config.BANDS,
+            'param_ranges': self.config.PARAM_RANGES
+        }
+
+        # 使用进程池执行
+        results = {}
+        start_time = time.time()
+
+        # 计算总任务数用于进度条
+        if total_combinations is None:
+            total_combinations = sum(len(param_list) for _, param_list in task_blocks)
+
+        with ProcessPoolExecutor(max_workers=max_workers) as executor:
+            futures = {}
+
+            # 提交所有任务
+            for i, (band_id, param_list) in enumerate(task_batches):
+                result_shm_name, progress_shm_name = shm_names[(band_id, i)]
+
+                future = executor.submit(
+                    worker_process,
+                    (band_id, param_list),
+                    result_shm_name,
+                    progress_shm_name,
+                    config_dict
+                )
+                futures[future] = (band_id, i, result_shm_name, progress_shm_name)
+
+            # 创建进度条
+            completed_samples = 0
+            with tqdm(total=total_combinations, desc="并行模拟", unit="样本",
+                      bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]") as pbar:
+
+                # 处理完成的任务
+                for future in as_completed(futures):
+                    band_id, batch_idx, result_shm_name, progress_shm_name = futures[future]
+
+                    try:
+                        result = future.result(timeout=3600)  # 1小时超时
+
+                        # 更新进度条
+                        completed_samples += result['completed'] + result['failed']
+                        pbar.update(result['completed'] + result['failed'])
+
+                        # 从共享内存获取数据
+                        if result_shm_name:
+                            result_array = self.shm_manager.get_shared_array(result_shm_name)
+
+                            # 转换为DataFrame
+                            df = self._array_to_dataframe(result_array, band_id)
+
+                            # 合并到结果中
+                            if band_id not in results:
+                                results[band_id] = df
+                            else:
+                                results[band_id] = pd.concat([results[band_id], df], ignore_index=True)
+
+                        # 清理共享内存
+                        try:
+                            shm = shared_memory.SharedMemory(name=result_shm_name)
+                            shm.close()
+                            shm.unlink()
+                        except:
+                            pass
+
+                        try:
+                            shm = shared_memory.SharedMemory(name=progress_shm_name)
+                            shm.close()
+                            shm.unlink()
+                        except:
+                            pass
+
+                    except Exception as e:
+                        self.logger.error(f"任务块 {band_id}_{batch_idx} 处理失败: {e}")
+
+        elapsed_time = time.time() - start_time
+
+        # 计算统计信息
+        total_samples = sum(len(df) for df in results.values())
+        success_rate = total_samples / total_combinations * 100 if total_combinations > 0 else 0
+
+        self.logger.info(f"并行模拟完成，耗时: {elapsed_time:.2f}秒")
+        self.logger.info(f"总样本数: {total_samples}/{total_combinations} ({success_rate:.1f}%)")
+        self.logger.info(f"平均速度: {total_samples / elapsed_time:.2f} 样本/秒")
+
+        # 清理共享内存管理器
         self.shm_manager.cleanup()
 
         return results
