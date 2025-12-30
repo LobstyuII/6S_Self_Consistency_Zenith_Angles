@@ -7,37 +7,6 @@ from pathlib import Path
 from datetime import datetime
 
 
-class LUTTaskConfig:
-    """LUT任务配置"""
-
-    # 参数分块配置
-    PARAM_BLOCKS = {
-        'sza': {'size': 5, 'overlap': 1},  # 每5度一个块，重叠1度
-        'vza': {'size': 5, 'overlap': 1},
-        'aod550': {'size': 0.1, 'overlap': 0.02},
-        'rho_true': {'size': 0.05, 'overlap': 0.01},
-        'h2o': {'size': 0.5, 'overlap': 0.1},
-        'o3': {'size': 0.01, 'overlap': 0.002}
-    }
-
-    # 任务管理
-    TASK_MANAGEMENT = {
-        'task_db_file': 'tasks.db',  # 任务状态数据库
-        'max_retries': 3,  # 最大重试次数
-        'chunk_size': 100,  # 每个任务块的大小
-        'checkpoint_interval': 100,  # 检查点间隔
-        'backup_interval': 1000,  # 备份间隔
-    }
-
-    # 数据存储
-    DATA_STORAGE = {
-        'block_format': 'netcdf',  # 块数据格式
-        'merge_format': 'netcdf',  # 合并数据格式
-        'compress_blocks': True,  # 压缩块数据
-        'keep_blocks': True,  # 保留块数据
-    }
-
-
 class ExperimentConfig:
     """实验配置参数"""
 

@@ -4,12 +4,11 @@
 """
 import argparse
 import sys
-import json
-from pathlib import Path
 import pandas as pd
 import numpy as np
 import logging
 import time
+from pathlib import Path
 
 from config import ExperimentConfig
 from data_generator import BatchSimulator
@@ -19,9 +18,6 @@ from validation import ModelValidator
 from paper_figures import PaperFiguresGenerator
 from utils import setup_logger, load_dataset, save_dataset
 from sensitivity_analyzer import SensitivityAnalyzer
-from task_manager import TaskManager, TaskStatus
-from block_simulator import BlockSimulator
-from data_merger import DataMerger
 from parallel_simulator import ParallelBlockSimulatorImproved
 
 import matplotlib
@@ -30,974 +26,150 @@ matplotlib.rcParams['font.sans-serif'] = ['SimHei', 'Microsoft YaHei', 'SimSun']
 matplotlib.rcParams['axes.unicode_minus'] = False
 
 
-def validate_data_columns(df: pd.DataFrame, band_id: str) -> bool:
-    """验证数据列是否完整"""
-    required_columns = ['sza', 'vza', 'error_absolute', 'rho_true', 'rho_retrieved']
-    missing_columns = [col for col in required_columns if col not in df.columns]
-
-    if missing_columns:
-        print(f"Warning: Band {band_id} data missing columns: {missing_columns}")
-        print(f"Available columns: {df.columns.tolist()}")
-        return False
-    return True
-
-
-def repair_missing_columns(df: pd.DataFrame) -> pd.DataFrame:
-    """修复缺失的列"""
-    df_repair = df.copy()
-
-    if 'error_absolute' not in df_repair.columns:
-        if 'rho_retrieved' in df_repair.columns and 'rho_true' in df_repair.columns:
-            print("Calculating missing error_absolute column...")
-            df_repair['error_absolute'] = df_repair['rho_retrieved'] - df_repair['rho_true']
-        else:
-            print("Cannot calculate error_absolute, creating empty column")
-            df_repair['error_absolute'] = np.nan
-
-    if 'airmass_sza' not in df_repair.columns and 'sza' in df_repair.columns:
-        df_repair['airmass_sza'] = 1.0 / np.cos(np.radians(df_repair['sza']))
-
-    if 'airmass_vza' not in df_repair.columns and 'vza' in df_repair.columns:
-        df_repair['airmass_vza'] = 1.0 / np.cos(np.radians(df_repair['vza']))
-
-    if 'airmass_sza' in df_repair.columns and 'airmass_vza' in df_repair.columns:
-        df_repair['total_airmass'] = df_repair['airmass_sza'] + df_repair['airmass_vza']
-
-    return df_repair
-
-
-def parse_constraints(constraints_str: str) -> dict:
-    """解析参数约束字符串"""
-    if not constraints_str:
-        return {}
-
-    constraints = {}
-    try:
-        for constraint in constraints_str.split(','):
-            if ':' in constraint:
-                param, range_str = constraint.split(':')
-                if '-' in range_str:
-                    min_val, max_val = map(float, range_str.split('-'))
-                    constraints[param] = (min_val, max_val)
-                else:
-                    # 单值约束
-                    constraints[param] = (float(range_str), float(range_str))
-    except Exception as e:
-        print(f"解析约束参数失败: {e}")
-        return {}
-
-    return constraints
-
-
 def main():
     """主函数"""
-    parser = argparse.ArgumentParser(description='6S几何误差校正实验 - 分块化LUT模拟')
+    parser = argparse.ArgumentParser(description='6S几何误差校正实验')
     parser.add_argument('--phase', type=str,
-                        choices=['all', 'simulate', 'analyze', 'sensitivity',
-                                 'train', 'validate', 'paper_figures', 'block_simulate'],
-                        default='all', help='运行阶段')
-    parser.add_argument('--mode', type=str,
-                        choices=['full', 'single_factor', 'multi_factor', 'airmass_only', 'paper_figures'],
-                        default='full', help='实验模式')
-    parser.add_argument('--band', type=str, default='band3',
-                        help='目标波段 (band1, band2, band3, all)')
-    parser.add_argument('--model_type', type=str, default='lut',
-                        help='校正模型类型 (lut, linear, polynomial, ml)')
-    parser.add_argument('--n_workers', type=int, default=None,
-                        help='并行工作进程数')
+                        choices=['analyze', 'sensitivity', 'paper_figures'],
+                        default='analyze', help='运行阶段')
+    parser.add_argument('--band', type=str, default='band1',
+                        choices=['band1', 'band2', 'band3', 'band4', 'band5', 'band6', 'all'],
+                        help='目标波段')
+    parser.add_argument('--data_file', type=str, default=None,
+                        help='数据文件路径（可选，默认自动查找）')
     parser.add_argument('--debug', action='store_true',
                         help='调试模式')
-    parser.add_argument('--force_repair', action='store_true',
-                        help='强制修复数据列')
-    parser.add_argument('--force_regenerate', action='store_true',
-                        help='强制重新生成数据')
-    parser.add_argument('--paper_figures_only', action='store_true',
-                        help='仅生成论文图表')
-
-    # 分块模拟相关参数
-    parser.add_argument('--block_mode', type=str,
-                        choices=['generate', 'run', 'resume', 'merge', 'status',
-                                 'clean', 'run_parallel'],
-                        default=None, help='分块模拟模式')
-    parser.add_argument('--max_blocks', type=int, default=None,
-                        help='最大处理块数')
-    parser.add_argument('--merge_constraints', type=str, default=None,
-                        help='合并数据时的参数约束，格式: "sza:0-30,vza:0-45"')
-    parser.add_argument('--task_config', type=str, default=None,
-                        help='任务配置文件路径')
-    parser.add_argument('--simulation_mode', type=str, default='full',
-                        choices=['full', 'paper_figures', 'sensitivity'],
-                        help='模拟模式配置')
 
     args = parser.parse_args()
 
     config = ExperimentConfig
-
-    if args.n_workers:
-        config.PARALLEL_CONFIG['n_workers'] = args.n_workers
-
     log_level = logging.DEBUG if args.debug else logging.INFO
-    logger = setup_logger('Main', config.BASE_DIR / 'experiment.log', level=log_level)
+    logger = setup_logger('MainSimple', config.BASE_DIR / 'experiment_simple.log', level=log_level)
 
     logger.info("=" * 60)
-    logger.info(f"6S几何误差校正实验 - {config.EXP_NAME} {config.EXP_VERSION}")
+    logger.info(f"6S几何误差校正实验 - 精简版")
     logger.info(f"运行阶段: {args.phase}")
     logger.info(f"目标波段: {args.band}")
-    logger.info(f"模型类型: {args.model_type}")
-    if args.block_mode:
-        logger.info(f"分块模拟模式: {args.block_mode}")
     logger.info("=" * 60)
 
-    # 确保所有目录存在
+    # 确保目录存在
     config.MANU_FIGURES_DIR.mkdir(parents=True, exist_ok=True)
-    config.DATA_DIR.mkdir(parents=True, exist_ok=True)
     config.RESULTS_DIR.mkdir(parents=True, exist_ok=True)
     config.FIGURES_DIR.mkdir(parents=True, exist_ok=True)
-    config.MODELS_DIR.mkdir(parents=True, exist_ok=True)
 
     try:
+        # 加载数据
         results = {}
 
-        # ==================== 分块模拟处理 ====================
-        if args.block_mode:
-            logger.info(f"进入分块模拟模式: {args.block_mode}")
-
-            # 初始化任务管理器
-            task_manager = TaskManager(config, logger)
-
-            if args.block_mode == 'generate':
-                # 生成任务块
-                logger.info("生成任务块...")
-
-                # 确定要处理的波段
-                bands_to_process = []
-                if args.band == 'all':
-                    bands_to_process = list(config.BANDS.keys())
-                else:
-                    bands_to_process = [args.band]
-
-                # 生成模拟器以获取参数网格
-                block_simulator = BlockSimulator(config, task_manager, logger)
-
-                total_tasks = 0
-                for band_id in bands_to_process:
-                    logger.info(f"为波段 {band_id} 生成任务块...")
-
-                    # 根据模拟模式获取参数配置
-                    if args.simulation_mode in config.SIMULATION_MODES:
-                        mode_config = config.SIMULATION_MODES[args.simulation_mode]
-                        param_grids = {}
-                        for param_name in ['sza', 'vza', 'aod550', 'rho_true', 'h2o', 'o3']:
-                            if param_name in mode_config:
-                                param_grids[param_name] = np.array(mode_config[param_name])
-                            else:
-                                # 使用默认配置
-                                if param_name in config.PARAM_RANGES:
-                                    param_config = config.PARAM_RANGES[param_name]
-                                    if isinstance(param_config, dict):
-                                        values = np.arange(
-                                            param_config['min'],
-                                            param_config['max'] + param_config['step'] / 2,
-                                            param_config['step']
-                                        )
-                                    else:
-                                        values = np.array(param_config)
-                                    param_grids[param_name] = values
-                    else:
-                        # 使用默认参数网格
-                        param_grids = block_simulator._generate_param_grids(band_id)
-
-                    # 生成任务块
-                    tasks = task_manager.generate_task_blocks(band_id, param_grids)
-                    task_manager.save_tasks(tasks)
-
-                    logger.info(f"波段 {band_id} 生成了 {len(tasks)} 个任务块")
-                    total_tasks += len(tasks)
-
-                logger.info(f"总共生成了 {total_tasks} 个任务块")
-
-                # 显示任务状态
-                if args.band != 'all':
-                    progress = task_manager.get_progress(args.band)
-                    logger.info(f"波段 {args.band} 任务状态:")
-                    logger.info(f"  总任务数: {progress['total_tasks']}")
-                    logger.info(f"  完成率: {progress['completion_rate']:.1f}%")
-                    for status, count in progress['status_counts'].items():
-                        logger.info(f"  {status}: {count}")
-
-            elif args.block_mode in ['run', 'resume']:
-                # 运行模拟任务
-                block_simulator = BlockSimulator(config, task_manager, logger)
-
-                # 确定要处理的波段
-                bands_to_process = []
-                if args.band == 'all':
-                    bands_to_process = list(config.BANDS.keys())
-                else:
-                    bands_to_process = [args.band]
-
-                total_results = {'completed': 0, 'failed': 0, 'total': 0}
-
-                for band_id in bands_to_process:
-                    logger.info(f"处理波段 {band_id} 的模拟任务...")
-
-                    # 检查任务状态
-                    progress = task_manager.get_progress(band_id)
-                    logger.info(f"波段 {band_id} 任务状态:")
-                    logger.info(f"  总任务数: {progress['total_tasks']}")
-                    logger.info(f"  完成率: {progress['completion_rate']:.1f}%")
-
-                    # 运行模拟
-                    result = block_simulator.run_batch(
-                        band_id,
-                        max_blocks=args.max_blocks,
-                        resume=(args.block_mode == 'resume')
-                    )
-
-                    logger.info(f"波段 {band_id} 完成: {result}")
-                    total_results['completed'] += result['completed']
-                    total_results['failed'] += result['failed']
-                    total_results['total'] += result['total']
-
-                logger.info(f"所有波段模拟完成:")
-                logger.info(f"  成功: {total_results['completed']}")
-                logger.info(f"  失败: {total_results['failed']}")
-                logger.info(f"  总计: {total_results['total']}")
-
-
-            elif args.block_mode == 'run_parallel':
-
-                # 使用改进的并行模拟器
-
-                logger.info("使用改进的并行模拟器...")
-
-                # 创建改进的并行模拟器
-
-                from parallel_simulator import ParallelBlockSimulatorImproved
-
-                parallel_simulator = ParallelBlockSimulatorImproved(config, logger)
-
-                # 生成参数组合（与单线程保持一致）
-
-                logger.info("生成参数组合（与单线程保持一致）...")
-
-                all_combinations = parallel_simulator.generate_all_param_combinations_consistent(args.mode)
-
-                # 转换为任务块格式
-
-                task_blocks = []
-
-                total_combinations = 0
-
-                if args.band == 'all':
-
-                    bands_to_process = list(config.BANDS.keys())
-
-                else:
-
-                    bands_to_process = [args.band]
-
-                for band_id in bands_to_process:
-
-                    if band_id in all_combinations:
-
-                        param_list = all_combinations[band_id]
-
-                        total_combinations += len(param_list)
-
-                        # 分批处理，每批chunk_size个参数组合
-
-                        chunk_size = config.PARALLEL_CONFIG.get('chunk_size', 1000)
-
-                        for i in range(0, len(param_list), chunk_size):
-                            chunk = param_list[i:i + chunk_size]
-
-                            task_blocks.append((band_id, chunk))
-
-                logger.info(f"准备处理 {len(task_blocks)} 个任务块，共 {total_combinations} 个参数组合")
-
-                # 设置工作进程数
-
-                if args.n_workers:
-
-                    n_workers = args.n_workers
-
-                else:
-
-                    import multiprocessing as mp
-
-                    physical_cores = mp.cpu_count() // 2
-
-                    max_concurrent = config.PARALLEL_CONFIG.get('max_concurrent_6s', 4)
-
-                    n_workers = min(physical_cores, max_concurrent)
-
-                # 运行改进的并行模拟
-
-                start_time = time.time()
-
-                results = parallel_simulator.simulate_blocks_parallel_improved(
-
-                    task_blocks,
-
-                    max_workers=n_workers
-
-                )
-
-                elapsed_time = time.time() - start_time
-
-                # 保存结果
-                total_samples = 0
-                for band_id, df in results.items():
-                    if len(df) > 0:
-                        output_file = config.DATA_DIR / f"simulation_results_{band_id}_parallel.nc"
-
-                        data_dict = {}
-                        for col in df.columns:
-                            col_data = df[col].values
-                            if col_data.dtype == object:
-                                try:
-                                    col_data = col_data.astype(str)
-                                except:
-                                    pass
-                            data_dict[col] = col_data
-
-                        save_dataset(data_dict, output_file)
-                        logger.info(f"波段 {band_id}: 保存 {len(df)} 个样本到 {output_file}")
-                        total_samples += len(df)
-
-                # 汇总统计
-                logger.info("=" * 60)
-                logger.info(f"并行模拟完成!")
-                logger.info(f"总耗时: {elapsed_time:.2f} 秒")
-                logger.info(f"总样本数: {total_samples}")
-                logger.info(f"平均速度: {total_samples / elapsed_time:.2f} 样本/秒")
-                logger.info(f"工作进程数: {n_workers}")
-                logger.info("=" * 60)
-
-                # 并行模式直接返回
-                return
-            elif args.block_mode == 'merge':
-                # 合并数据块
-                data_merger = DataMerger(config, task_manager, logger)
-
-                # 解析约束条件
-                constraints = parse_constraints(args.merge_constraints)
-
-                bands_to_process = []
-                if args.band == 'all':
-                    bands_to_process = list(config.BANDS.keys())
-                else:
-                    bands_to_process = [args.band]
-
-                for band_id in bands_to_process:
-                    logger.info(f"合并波段 {band_id} 的数据...")
-
-                    if constraints:
-                        # 选择性合并
-                        merged_df = data_merger.merge_selective(band_id, constraints)
-                        if not merged_df.empty:
-                            # 保存结果
-                            constraints_str = "_".join([f"{k}_{v[0]}-{v[1]}" for k, v in constraints.items()])
-                            output_file = config.DATA_DIR / f"simulation_results_{band_id}_{constraints_str}.nc"
-
-                            data_dict = {}
-                            for col in merged_df.columns:
-                                col_data = merged_df[col].values
-                                if col_data.dtype == object:
-                                    try:
-                                        col_data = col_data.astype(str)
-                                    except:
-                                        pass
-                                data_dict[col] = col_data
-
-                            save_dataset(data_dict, output_file)
-                            logger.info(f"波段 {band_id} 选择性合并完成: {len(merged_df)} 行数据 -> {output_file}")
-                            results[band_id] = merged_df
-                        else:
-                            logger.warning(f"波段 {band_id} 没有满足条件的数据")
-                    else:
-                        # 合并所有完成的数据块
-                        merged_df = data_merger.merge_blocks(band_id)
-                        if not merged_df.empty:
-                            # 保存结果
-                            output_file = config.DATA_DIR / f"simulation_results_{band_id}_merged.nc"
-
-                            data_dict = {}
-                            for col in merged_df.columns:
-                                col_data = merged_df[col].values
-                                if col_data.dtype == object:
-                                    try:
-                                        col_data = col_data.astype(str)
-                                    except:
-                                        pass
-                                data_dict[col] = col_data
-
-                            save_dataset(data_dict, output_file)
-                            logger.info(f"波段 {band_id} 合并完成: {len(merged_df)} 行数据 -> {output_file}")
-                            results[band_id] = merged_df
-                        else:
-                            logger.warning(f"波段 {band_id} 没有可合并的数据")
-
-            elif args.block_mode == 'status':
-                # 显示任务状态
-                logger.info("任务状态报告:")
-
-                bands_to_check = []
-                if args.band == 'all':
-                    bands_to_check = list(config.BANDS.keys())
-                else:
-                    bands_to_check = [args.band]
-
-                for band_id in bands_to_check:
-                    progress = task_manager.get_progress(band_id)
-                    logger.info(f"\n波段 {band_id}:")
-                    logger.info(f"  总任务数: {progress['total_tasks']}")
-                    logger.info(f"  完成率: {progress['completion_rate']:.1f}%")
-
-                    for status, count in progress['status_counts'].items():
-                        if count > 0:
-                            logger.info(f"  {status}: {count}")
-
-            elif args.block_mode == 'clean':
-                # 清理任务状态（重置失败的任务）
-                logger.info("清理失败的任务...")
-
-                # 这里实现清理逻辑
-                # 例如：将所有失败的任务状态重置为PENDING
-                # 实现略...
-
-                logger.info("清理完成")
-
-            # 分块模拟模式直接返回，不执行后续流程
-            if args.block_mode in ['generate', 'run', 'resume', 'merge', 'status', 'clean']:
-                logger.info("分块模拟处理完成")
-                return
-
-        # ==================== 传统处理流程 ====================
-        # 如果仅生成论文图表，跳过数据生成阶段
-        if not args.paper_figures_only:
-            # 阶段1: 数据生成
-            if args.phase in ['all', 'simulate']:
-                logger.info("阶段1: 数据生成")
-                results = {}
-
-                if args.band == 'all':
-                    simulator = BatchSimulator(config, logger)
-                    for band_id in config.BANDS.keys():
-                        logger.info(f"开始处理波段: {band_id}")
-                        data_file = config.DATA_DIR / f"simulation_results_{band_id}_{args.mode}.nc"
-
-                        should_regenerate = False
-                        if args.force_regenerate:
-                            should_regenerate = True
-                            logger.info(f"强制重新生成波段 {band_id} 的数据")
-                        elif not data_file.exists():
-                            should_regenerate = True
-                            logger.info(f"数据文件不存在: {data_file}")
-                        elif data_file.stat().st_size < 100:
-                            should_regenerate = True
-                            logger.warning(f"数据文件可能损坏")
-                        elif not args.debug and not args.force_repair:
-                            try:
-                                data_dict = load_dataset(data_file)
-                                if not data_dict or len(data_dict) == 0:
-                                    logger.warning(f"数据文件为空或损坏: {data_file}")
-                                    should_regenerate = True
-                                else:
-                                    df_result = pd.DataFrame(data_dict)
-                                    if len(df_result) == 0:
-                                        logger.warning(f"DataFrame为空: {data_file}")
-                                        should_regenerate = True
-                                    else:
-                                        required_columns = ['sza', 'vza', 'error_absolute', 'rho_true', 'rho_retrieved']
-                                        missing_columns = [col for col in required_columns if
-                                                           col not in df_result.columns]
-
-                                        if missing_columns:
-                                            logger.warning(f"波段 {band_id} 数据缺少列: {missing_columns}")
-                                            should_regenerate = True
-                                        else:
-                                            results[band_id] = df_result
-                                            logger.info(f"波段 {band_id} 数据加载成功，形状: {df_result.shape}")
-                            except Exception as e:
-                                logger.error(f"加载数据失败: {e}")
-                                should_regenerate = True
-
-                        if should_regenerate:
-                            logger.info(f"生成波段 {band_id} 的数据...")
-                            results[band_id] = simulator.run_batch_simulation(band_id, args.mode)
-                        else:
-                            logger.info(f"使用现有数据: {data_file}")
-
-                else:
-                    data_file = config.DATA_DIR / f"simulation_results_{args.band}_{args.mode}.nc"
-                    should_regenerate = False
-
-                    if args.force_regenerate:
-                        should_regenerate = True
-                        logger.info(f"强制重新生成波段 {args.band} 的数据")
-                    elif not data_file.exists():
-                        should_regenerate = True
-                        logger.info(f"数据文件不存在: {data_file}")
-                    elif data_file.stat().st_size < 100:
-                        should_regenerate = True
-                        logger.warning(f"数据文件可能损坏")
-                    elif not args.debug and not args.force_repair:
-                        try:
-                            data_dict = load_dataset(data_file)
-                            if not data_dict or len(data_dict) == 0:
-                                logger.warning(f"数据文件为空或损坏: {data_file}")
-                                should_regenerate = True
-                            else:
-                                df_result = pd.DataFrame(data_dict)
-                                if len(df_result) == 0:
-                                    logger.warning(f"DataFrame为空: {data_file}")
-                                    should_regenerate = True
-                                else:
-                                    required_columns = ['sza', 'vza', 'error_absolute', 'rho_true', 'rho_retrieved']
-                                    missing_columns = [col for col in required_columns if col not in df_result.columns]
-
-                                    if missing_columns:
-                                        logger.warning(f"数据缺少列: {missing_columns}")
-                                        should_regenerate = True
-                                    else:
-                                        results = {args.band: df_result}
-                                        logger.info(f"数据加载成功，形状: {df_result.shape}")
-                        except Exception as e:
-                            logger.error(f"加载数据失败: {e}")
-                            should_regenerate = True
-
-                    if should_regenerate:
-                        logger.info(f"生成波段 {args.band} 的数据...")
-                        simulator = BatchSimulator(config, logger)
-                        results = {args.band: simulator.run_batch_simulation(args.band, args.mode)}
-                    else:
-                        logger.info(f"使用现有数据: {data_file}")
-
+        if args.data_file:
+            data_files = [Path(args.data_file)]
+        else:
+            # 自动查找数据文件
+            if args.band == 'all':
+                data_files = list(config.DATA_DIR.glob("simulation_results_band*_parallel.nc"))
             else:
-                logger.info("加载现有数据")
+                data_files = list(config.DATA_DIR.glob(f"simulation_results_{args.band}_parallel.nc"))
 
-                if args.band == 'all':
-                    results = {}
-                    for band_id in config.BANDS.keys():
-                        data_file = config.DATA_DIR / f"simulation_results_{band_id}_{args.mode}.nc"
+        if not data_files:
+            logger.error("找不到数据文件")
+            return
 
-                        if not data_file.exists():
-                            alt_files = list(config.DATA_DIR.glob(f"simulation_results_{band_id}_*.nc"))
-                            if alt_files:
-                                data_file = alt_files[0]
-                                logger.info(f"波段 {band_id} 使用替代数据文件: {data_file}")
-                            else:
-                                logger.warning(f"找不到波段 {band_id} 的数据文件，跳过")
-                                continue
-
-                        try:
-                            data_dict = load_dataset(data_file)
-                            if not data_dict or len(data_dict) == 0:
-                                logger.warning(f"波段 {band_id} 数据文件为空")
-                                continue
-
-                            df_result = pd.DataFrame(data_dict)
-
-                            if len(df_result) == 0:
-                                logger.warning(f"波段 {band_id} DataFrame为空")
-                                continue
-
-                            if not validate_data_columns(df_result, band_id) or args.force_repair:
-                                logger.info(f"修复波段 {band_id} 数据列...")
-                                df_result = repair_missing_columns(df_result)
-                                save_dataset({col: df_result[col].values for col in df_result.columns}, data_file)
-                                logger.info(f"波段 {band_id} 数据已修复并重新保存: {data_file}")
-
-                            results[band_id] = df_result
-                            logger.info(f"波段 {band_id} 数据加载成功，形状: {df_result.shape}")
-
-                        except Exception as e:
-                            logger.error(f"波段 {band_id} 加载数据失败: {e}")
-
-                else:
-                    data_file = config.DATA_DIR / f"simulation_results_{args.band}_{args.mode}.nc"
-
-                    if not data_file.exists():
-                        alt_files = list(config.DATA_DIR.glob(f"simulation_results_{args.band}_*.nc"))
-                        if alt_files:
-                            data_file = alt_files[0]
-                            logger.info(f"使用替代数据文件: {data_file}")
-                        else:
-                            raise FileNotFoundError(f"找不到 {args.band} 的数据文件")
-
-                    try:
-                        data_dict = load_dataset(data_file)
-                        if not data_dict or len(data_dict) == 0:
-                            raise ValueError(f"数据文件为空: {data_file}")
-
-                        df_result = pd.DataFrame(data_dict)
-
-                        if len(df_result) == 0:
-                            raise ValueError(f"DataFrame为空: {data_file}")
-
-                        if not validate_data_columns(df_result, args.band) or args.force_repair:
-                            logger.info("修复数据列...")
-                            df_result = repair_missing_columns(df_result)
-                            save_dataset({col: df_result[col].values for col in df_result.columns}, data_file)
-                            logger.info(f"数据已修复并重新保存: {data_file}")
-
-                        results = {args.band: df_result}
-                        logger.info(f"数据加载成功，形状: {df_result.shape}")
-
-                        if 'error_absolute' in df_result.columns:
-                            error_data = df_result['error_absolute'].dropna()
-                            logger.info(f"误差统计 - 均值: {error_data.mean():.6f}, "
-                                        f"标准差: {error_data.std():.6f}, "
-                                        f"有效样本: {len(error_data)}")
-
-                    except Exception as e:
-                        logger.error(f"加载数据失败: {e}")
-                        raise
-
-            # 检查是否有有效数据
-            if not results:
-                logger.error("没有有效数据，程序退出")
-                return
-
-            valid_bands = [band_id for band_id, df in results.items()
-                           if isinstance(df, pd.DataFrame) and len(df) > 0]
-
-            if not valid_bands:
-                logger.error("所有波段都没有有效数据，程序退出")
-                return
-
-            logger.info(f"有效波段: {valid_bands}")
-
-            # 阶段2: 误差分析
-            if args.phase in ['all', 'analyze'] and results:
-                logger.info("阶段2: 误差分析")
-
-                valid_results = {}
-                for band_id, df in results.items():
-                    if isinstance(df, pd.DataFrame) and len(df) > 0:
-                        required_columns = ['sza', 'vza', 'error_absolute']
-                        if all(col in df.columns for col in required_columns):
-                            if df['error_absolute'].notna().sum() > 0:
-                                valid_results[band_id] = df
-                                logger.info(f"波段 {band_id} 有 {df['error_absolute'].notna().sum()} 个有效误差样本")
-                            else:
-                                logger.warning(f"波段 {band_id} 没有有效的误差数据")
-                        else:
-                            missing = [col for col in required_columns if col not in df.columns]
-                            logger.warning(f"波段 {band_id} 缺少列: {missing}")
-
-                if not valid_results:
-                    logger.warning("没有有效数据用于误差分析")
-                else:
-                    for band_id in list(valid_results.keys()):
-                        try:
-                            logger.info(f"分析波段 {band_id}...")
-                            df_band = valid_results[band_id]
-
-                            if len(df_band) < 10:
-                                logger.warning(f"波段 {band_id} 数据量不足，跳过详细分析")
-                                continue
-
-                            error_count = df_band['error_absolute'].notna().sum()
-                            if error_count < 10:
-                                logger.warning(f"波段 {band_id} 有效误差数据不足，跳过详细分析")
-                                continue
-
-                            band_results = {band_id: df_band}
-                            analyzer = ErrorAnalyzer(band_results, logger)
-
-                            # 生成误差报告
-                            report_file = config.RESULTS_DIR / f"error_analysis_report_{band_id}.txt"
-                            try:
-                                stats = analyzer.calculate_overall_statistics()
-                                with open(report_file, 'w', encoding='utf-8') as f:
-                                    f.write("误差分析报告\n")
-                                    f.write(f"波段: {band_id}\n")
-                                    f.write(f"样本数: {len(df_band)}\n")
-                                    f.write(f"有效误差数据: {error_count}\n")
-                                    if band_id in stats:
-                                        for key, value in stats[band_id].items():
-                                            if key != 'error':
-                                                f.write(f"{key}: {value:.6f}\n")
-                                    else:
-                                        f.write("无法计算统计量\n")
-                                logger.info(f"波段 {band_id} 误差分析报告已保存: {report_file}")
-                            except Exception as e:
-                                logger.warning(f"波段 {band_id} 生成报告失败: {e}")
-
-                            # 生成关键图表
-                            try:
-                                summary_file = config.FIGURES_DIR / f"error_summary_{band_id}.png"
-                                analyzer.create_summary_figure(band_id=band_id, save_path=summary_file)
-                                logger.info(f"波段 {band_id} 综合摘要图已保存: {summary_file}")
-                            except Exception as e:
-                                logger.warning(f"波段 {band_id} 绘制综合摘要图失败: {e}")
-
-                        except Exception as e:
-                            logger.error(f"波段 {band_id} 误差分析失败: {e}")
-
-                # 阶段2.5: 敏感性分析
-                if args.phase in ['all', 'sensitivity'] and results:
-                    logger.info("阶段2.5: 敏感性分析")
-
-                    if args.band == 'all':
-                        band_data_list = []
-                        for band_id, df in results.items():
-                            if isinstance(df, pd.DataFrame) and len(df) > 0:
-                                df_copy = df.copy()
-                                df_copy['band'] = band_id
-                                band_data_list.append(df_copy)
-
-                        if band_data_list:
-                            all_data = pd.concat(band_data_list, ignore_index=True)
-                        else:
-                            all_data = pd.DataFrame()
-
-                        if 'error_absolute' in all_data.columns:
-                            error_count = all_data['error_absolute'].notna().sum()
-                        else:
-                            error_count = 0
-
-                        if error_count < 10:
-                            logger.warning(f"误差数据不足，跳过敏感性分析")
-                        else:
-                            sensitivity_analyzer = SensitivityAnalyzer(all_data, logger)
-                            sens_report_file = config.RESULTS_DIR / f"sensitivity_report_all_{args.mode}.txt"
-
-                            try:
-                                sens_report = sensitivity_analyzer.generate_sensitivity_report(sens_report_file)
-                                logger.info(f"敏感性分析报告已生成: {sens_report_file}")
-                            except Exception as e:
-                                logger.error(f"生成敏感性报告失败: {e}")
-
-                    else:
-                        if args.band in results:
-                            band_data = results[args.band]
-
-                            if 'error_absolute' in band_data.columns:
-                                error_count = band_data['error_absolute'].notna().sum()
-                            else:
-                                error_count = 0
-
-                            if error_count < 10:
-                                logger.warning(f"误差数据不足，跳过敏感性分析")
-                            else:
-                                sensitivity_analyzer = SensitivityAnalyzer(band_data, logger)
-                                sens_report_file = config.RESULTS_DIR / f"sensitivity_report_{args.band}_{args.mode}.txt"
-
-                                try:
-                                    sens_report = sensitivity_analyzer.generate_sensitivity_report(sens_report_file)
-                                    logger.info(f"敏感性分析报告已生成: {sens_report_file}")
-                                except Exception as e:
-                                    logger.error(f"生成敏感性报告失败: {e}")
-
-            # 阶段3: 模型训练
-            if args.phase in ['all', 'train'] and results:
-                logger.info("阶段3: 模型训练")
-
-                if args.band == 'all':
-                    band_data_list = []
-                    for band_id, df in results.items():
-                        if isinstance(df, pd.DataFrame) and len(df) > 0:
-                            df_copy = df.copy()
-                            df_copy['band'] = band_id
-                            band_data_list.append(df_copy)
-
-                    if band_data_list:
-                        all_data = pd.concat(band_data_list, ignore_index=True)
-                    else:
-                        all_data = pd.DataFrame()
-
-                    if 'error_absolute' in all_data.columns:
-                        error_data = all_data['error_absolute'].dropna()
-                    else:
-                        error_data = pd.Series([], dtype=float)
-
-                    if len(error_data) < 50:
-                        logger.warning(f"有效误差数据不足，跳过模型训练")
-                    else:
-                        trainer = ModelTrainer(config, logger)
-
-                        for band_id in config.BANDS.keys():
-                            try:
-                                if band_id in results and isinstance(results[band_id], pd.DataFrame):
-                                    band_data = results[band_id]
-                                    if len(band_data) < 50:
-                                        logger.warning(f"波段 {band_id} 数据不足，跳过训练")
-                                        continue
-
-                                    model_name = f"{args.model_type}_{band_id}"
-                                    model = trainer.train_model(all_data, band_id, args.model_type, model_name)
-                                    logger.info(f"波段 {band_id} 模型训练完成")
-
-                            except Exception as e:
-                                logger.error(f"波段 {band_id} 模型训练失败: {e}")
-
-                else:
-                    if args.band in results:
-                        all_data = pd.concat([df for df in results.values() if isinstance(df, pd.DataFrame)],
-                                             ignore_index=True)
-
-                        if 'error_absolute' in all_data.columns:
-                            error_data = all_data['error_absolute'].dropna()
-                        else:
-                            error_data = pd.Series([], dtype=float)
-
-                        if len(error_data) < 50:
-                            logger.warning(f"有效误差数据不足，跳过模型训练")
-                        else:
-                            trainer = ModelTrainer(config, logger)
-
-                            try:
-                                model = trainer.train_model(all_data, args.band, args.model_type)
-                            except Exception as e:
-                                logger.error(f"模型训练失败: {e}")
-
-            # 阶段4: 模型验证
-            if args.phase in ['all', 'validate'] and results:
-                logger.info("阶段4: 模型验证")
-
-                if args.band == 'all':
-                    band_data_list = []
-                    for band_id, df in results.items():
-                        if isinstance(df, pd.DataFrame) and len(df) > 0:
-                            df_copy = df.copy()
-                            df_copy['band'] = band_id
-                            band_data_list.append(df_copy)
-
-                    if band_data_list:
-                        all_data = pd.concat(band_data_list, ignore_index=True)
-                    else:
-                        all_data = pd.DataFrame()
-
-                    if 'error_absolute' in all_data.columns:
-                        error_count = all_data['error_absolute'].notna().sum()
-                    else:
-                        error_count = 0
-
-                    if error_count < 20:
-                        logger.warning(f"验证数据不足，跳过模型验证")
-                    else:
-                        validator = ModelValidator(config, logger)
-                        validation_results = {}
-
-                        for band_id in config.BANDS.keys():
-                            try:
-                                if band_id in results and isinstance(results[band_id], pd.DataFrame):
-                                    band_data = results[band_id]
-                                    if len(band_data) < 10:
-                                        logger.warning(f"波段 {band_id} 数据不足，跳过验证")
-                                        continue
-
-                                    cv_results = validator.cross_validate(all_data, band_id, model_type=args.model_type)
-                                    val_fig_file = config.FIGURES_DIR / f"validation_{band_id}_{args.model_type}.png"
-                                    val_results = validator.plot_validation_results(all_data, band_id,
-                                                                                    save_path=val_fig_file)
-
-                                    validation_results[band_id] = {
-                                        **cv_results,
-                                        **val_results
-                                    }
-
-                            except Exception as e:
-                                logger.error(f"波段 {band_id} 验证失败: {e}")
-
-                else:
-                    if args.band in results:
-                        all_data = pd.concat([df for df in results.values() if isinstance(df, pd.DataFrame)],
-                                             ignore_index=True)
-
-                        if 'error_absolute' in all_data.columns:
-                            error_count = all_data['error_absolute'].notna().sum()
-                        else:
-                            error_count = 0
-
-                        if error_count < 20:
-                            logger.warning(f"验证数据不足，跳过模型验证")
-                        else:
-                            validator = ModelValidator(config, logger)
-
-                            try:
-                                cv_results = validator.cross_validate(all_data, args.band, model_type=args.model_type)
-                                logger.info(f"交叉验证结果 - RMSE: {cv_results.get('cv_rmse_mean', np.nan):.6f}")
-
-                                val_fig_file = config.FIGURES_DIR / f"validation_{args.band}_{args.model_type}.png"
-                                val_results = validator.plot_validation_results(all_data, args.band,
-                                                                                save_path=val_fig_file)
-
-                                corrected_data = validator.apply_correction(all_data, args.band)
-                                corrected_file = config.DATA_DIR / f"corrected_results_{args.band}.nc"
-                                save_dataset({col: corrected_data[col].values for col in corrected_data.columns},
-                                             corrected_file)
-                                logger.info(f"校正后数据已保存: {corrected_file}")
-
-                            except Exception as e:
-                                logger.error(f"验证失败: {e}")
-
-        # ==================== 阶段5: 生成论文图表 ====================
-        if args.phase in ['all', 'paper_figures']:
-            logger.info("阶段5: 生成论文图表")
-
-            # 重新加载数据以确保完整性
-            if not results:
-                results = {}
-                if args.band == 'all':
-                    for band_id in config.BANDS.keys():
-                        data_file = config.DATA_DIR / f"simulation_results_{band_id}_paper_figures.nc"
-                        if not data_file.exists():
-                            alt_files = list(config.DATA_DIR.glob(f"simulation_results_{band_id}_*.nc"))
-                            if alt_files:
-                                data_file = alt_files[0]
-
-                        try:
-                            data_dict = load_dataset(data_file)
-                            if data_dict:
-                                df = pd.DataFrame(data_dict)
-                                if len(df) > 0:
-                                    results[band_id] = df
-                        except Exception as e:
-                            logger.error(f"加载波段 {band_id} 数据失败: {e}")
-                else:
-                    data_file = config.DATA_DIR / f"simulation_results_{args.band}_paper_figures.nc"
-                    if not data_file.exists():
-                        alt_files = list(config.DATA_DIR.glob(f"simulation_results_{args.band}_*.nc"))
-                        if alt_files:
-                            data_file = alt_files[0]
-
-                    try:
-                        data_dict = load_dataset(data_file)
-                        if data_dict:
-                            df = pd.DataFrame(data_dict)
-                            if len(df) > 0:
-                                results = {args.band: df}
-                    except Exception as e:
-                        logger.error(f"加载波段 {args.band} 数据失败: {e}")
-
-            if not results:
-                logger.error("没有数据用于生成论文图表")
-                return
-
+        for data_file in data_files:
             try:
-                # 创建论文图表生成器
-                generator = PaperFiguresGenerator(results, logger)
+                logger.info(f"加载数据文件: {data_file}")
+                data_dict = load_dataset(data_file)
+                df = pd.DataFrame(data_dict)
 
-                # 生成所有论文图表
-                generator.generate_all_figures()
-
-                logger.info("论文图表已生成并保存到: %s", config.MANU_FIGURES_DIR)
+                # 提取波段信息
+                if 'band' in df.columns:
+                    band_ids = df['band'].unique()
+                    for band_id in band_ids:
+                        band_data = df[df['band'] == band_id].copy()
+                        if len(band_data) > 0:
+                            results[str(band_id)] = band_data
+                            logger.info(f"波段 {band_id}: {len(band_data)} 个样本")
+                else:
+                    # 从文件名提取波段
+                    filename = data_file.stem
+                    band_id = filename.split('_')[2]  # simulation_results_band1_parallel
+                    results[band_id] = df
 
             except Exception as e:
+                logger.error(f"加载文件 {data_file} 失败: {e}")
+
+        if not results:
+            logger.error("没有加载到有效数据")
+            return
+
+        # 阶段1: 误差分析
+        if args.phase in ['analyze', 'all']:
+            logger.info("阶段1: 误差分析")
+
+            for band_id, df in results.items():
+                try:
+                    logger.info(f"分析波段 {band_id}...")
+                    band_results = {band_id: df}
+                    analyzer = ErrorAnalyzer(band_results, logger)
+
+                    # 生成误差报告
+                    report_file = config.RESULTS_DIR / f"error_analysis_report_{band_id}.txt"
+                    stats = analyzer.calculate_overall_statistics()
+
+                    with open(report_file, 'w', encoding='utf-8') as f:
+                        f.write("误差分析报告\n")
+                        f.write(f"波段: {band_id}\n")
+                        f.write(f"样本数: {len(df)}\n")
+                        f.write(f"有效误差数据: {df['error_absolute'].notna().sum()}\n")
+                        if band_id in stats:
+                            for key, value in stats[band_id].items():
+                                f.write(f"{key}: {value:.6f}\n")
+
+                    logger.info(f"误差分析报告已保存: {report_file}")
+
+                except Exception as e:
+                    logger.error(f"波段 {band_id} 误差分析失败: {e}")
+
+        # 阶段2: 敏感性分析
+        if args.phase in ['sensitivity', 'all']:
+            logger.info("阶段2: 敏感性分析")
+
+            # 合并所有波段数据
+            all_data_list = []
+            for band_id, df in results.items():
+                df_copy = df.copy()
+                df_copy['band'] = band_id
+                all_data_list.append(df_copy)
+
+            if all_data_list:
+                all_data = pd.concat(all_data_list, ignore_index=True)
+
+                if 'error_absolute' in all_data.columns and all_data['error_absolute'].notna().sum() > 10:
+                    sensitivity_analyzer = SensitivityAnalyzer(all_data, logger)
+                    sens_report_file = config.RESULTS_DIR / f"sensitivity_report_all.txt"
+
+                    try:
+                        sens_report = sensitivity_analyzer.generate_sensitivity_report(sens_report_file)
+                        logger.info(f"敏感性分析报告已生成: {sens_report_file}")
+                    except Exception as e:
+                        logger.error(f"生成敏感性报告失败: {e}")
+
+        # 阶段3: 生成论文图表
+        if args.phase == 'paper_figures':
+            logger.info("阶段3: 生成论文图表")
+
+            try:
+                generator = PaperFiguresGenerator(results, logger)
+                generator.generate_all_figures()
+                logger.info(f"论文图表已生成并保存到: {config.MANU_FIGURES_DIR}")
+            except Exception as e:
                 logger.error(f"生成论文图表失败: {e}")
-                raise
 
         logger.info("=" * 60)
-        logger.info("实验完成!")
+        logger.info("分析完成!")
         logger.info("=" * 60)
 
     except Exception as e:
-        logger.error(f"实验失败: {e}")
+        logger.error(f"程序失败: {e}")
         import traceback
         logger.error(traceback.format_exc())
         sys.exit(1)
