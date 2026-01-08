@@ -62,3 +62,17 @@ python batch_parallel.py --band band6 --chunk_size 100 --n_workers 8
 
 python batch_parallel.py --band band1 --chunk_size 100 --n_workers 8
 
+
+
+# 生成所有图表
+python run_experimental_figures.py
+
+# 生成指定图表（如1,3,5号图表）
+python run_experimental_figures.py --figures 1,3,5
+
+# 指定数据目录
+python run_experimental_figures.py --data_dir "D:/6S_Self_Consistency_Zenith_Angles/data"
+
+# 调试模式
+python run_experimental_figures.py --debug
+

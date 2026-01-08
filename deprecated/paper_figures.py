@@ -5,14 +5,14 @@
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
-from typing import Dict, List, Optional, Tuple
+from typing import Dict
 from pathlib import Path
 from scipy import stats
 
 from config import ExperimentConfig
 from utils import setup_logger
 from error_analyzer import ErrorAnalyzer
-from sensitivity_analyzer import SensitivityAnalyzer
+from deprecated.sensitivity_analyzer import SensitivityAnalyzer
 import matplotlib
 
 matplotlib.rcParams['font.sans-serif'] = ['SimHei', 'Microsoft YaHei', 'SimSun']

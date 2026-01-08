@@ -5,13 +5,13 @@
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
-from typing import Dict, List, Tuple, Optional
+from typing import Dict, Optional
 from pathlib import Path
-from sklearn.model_selection import train_test_split, KFold
+from sklearn.model_selection import KFold
 from scipy import stats
 
 from config import ExperimentConfig
-from utils import setup_logger, calculate_airmass
+from utils import setup_logger
 
 
 class ModelValidator:
@@ -24,7 +24,7 @@ class ModelValidator:
     def cross_validate(self, data: pd.DataFrame, band_id: str = 'band3',
                        n_splits: int = 5, model_type: str = 'lut') -> Dict[str, float]:
         """交叉验证"""
-        from correction_model import ModelFactory
+        from deprecated.correction_model import ModelFactory
 
         band_data = data[data['band'] == band_id].copy()
 
@@ -104,7 +104,6 @@ class ModelValidator:
     def plot_validation_results(self, data: pd.DataFrame, band_id: str = 'band3',
                                 model_path: Optional[Path] = None, save_path: Optional[Path] = None):
         """绘制验证结果"""
-        from correction_model import ModelFactory
 
         band_data = data[data['band'] == band_id].copy()
         features = ['sza', 'vza', 'aod550', 'rho_true']
@@ -121,7 +120,7 @@ class ModelValidator:
             model_path = model_files[0]
 
         if 'lut' in model_path.stem:
-            from correction_model import LUTCorrectionModel
+            from deprecated.correction_model import LUTCorrectionModel
             model = LUTCorrectionModel()
             model.load(model_path)
             model_type = 'lut'
@@ -129,7 +128,7 @@ class ModelValidator:
             import joblib
             model_data = joblib.load(model_path)
             if 'formula_type' in model_data:
-                from correction_model import AnalyticalCorrectionModel
+                from deprecated.correction_model import AnalyticalCorrectionModel
                 model = AnalyticalCorrectionModel()
                 model.load(model_path)
                 model_type = 'analytical'
@@ -248,7 +247,6 @@ class ModelValidator:
     def apply_correction(self, data: pd.DataFrame, band_id: str = 'band3',
                          model_path: Optional[Path] = None) -> pd.DataFrame:
         """应用校正"""
-        from correction_model import ModelFactory
 
         band_data = data[data['band'] == band_id].copy()
 
@@ -263,7 +261,7 @@ class ModelValidator:
             model_path = model_files[0]
 
         if 'lut' in model_path.stem:
-            from correction_model import LUTCorrectionModel
+            from deprecated.correction_model import LUTCorrectionModel
             model = LUTCorrectionModel()
             model.load(model_path)
             model_type = 'lut'
@@ -271,7 +269,7 @@ class ModelValidator:
             import joblib
             model_data = joblib.load(model_path)
             if 'formula_type' in model_data:
-                from correction_model import AnalyticalCorrectionModel
+                from deprecated.correction_model import AnalyticalCorrectionModel
                 model = AnalyticalCorrectionModel()
                 model.load(model_path)
                 model_type = 'analytical'

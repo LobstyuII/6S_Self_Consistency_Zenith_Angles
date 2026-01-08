@@ -5,20 +5,14 @@
 import argparse
 import sys
 import pandas as pd
-import numpy as np
 import logging
-import time
 from pathlib import Path
 
 from config import ExperimentConfig
-from data_generator import BatchSimulator
-from error_analyzer import ErrorAnalyzer
-from correction_model import ModelTrainer
-from validation import ModelValidator
-from paper_figures import PaperFiguresGenerator
-from utils import setup_logger, load_dataset, save_dataset
-from sensitivity_analyzer import SensitivityAnalyzer
-from parallel_simulator import ParallelBlockSimulatorImproved
+from deprecated.error_analyzer import ErrorAnalyzer
+from deprecated.paper_figures import PaperFiguresGenerator
+from utils import setup_logger, load_dataset
+from deprecated.sensitivity_analyzer import SensitivityAnalyzer
 
 import matplotlib
 

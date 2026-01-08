@@ -1,0 +1,147 @@
+ 一、数据模拟与生成命令
+ 1. 批量并行数据生成
+
+# 生成单个波段数据（推荐使用band6作为测试）
+python batch_parallel.py --band band6 --n_workers 8 --chunk_size 100
+
+# 生成所有波段数据（全量模拟）
+python batch_parallel.py --bands all --n_workers 12 --mode full
+
+# 生成论文图表所需数据（精简模式）
+python batch_parallel.py --bands all --n_workers 8 --mode paper_figures
+
+# 调试模式运行（生成band1数据）
+python batch_parallel.py --band band1 --n_workers 4 --chunk_size 50 --debug
+
+二、数据完整性检查命令
+1. 检查所有波段数据完整性
+
+# 使用默认数据目录检查
+python check_data_integrity.py
+
+# 指定数据目录检查
+python check_data_integrity.py --data_dir "D:/6S_Self_Consistency_Zenith_Angles/data"
+
+# 生成详细报告
+python check_data_integrity.py --detailed --output_dir "./integrity_reports"
+
+2. 快速完整性检查
+
+# 生成简要报告
+python check_data_integrity.py --data_dir ./data
+
+# 查看关键指标
+python check_data_integrity.py | grep -E "(文件不存在|样本数量|成功率|缺失列)"
+
+3. 检查特定波段数据
+
+# 检查单个波段
+python -c "
+import sys
+sys.path.append('.')
+from check_data_integrity import check_file_integrity
+from pathlib import Path
+result = check_file_integrity(Path('./data/simulation_results_band6_parallel.nc'), 'band6')
+print('文件大小:', result.get('file_size', 0), 'MB')
+print('样本数量:', result.get('n_samples', 0))
+print('成功率:', result.get('success_rate', 0), '%')
+"
+
+三、数据分析与可视化命令
+1. 生成论文图表
+
+# 使用现有数据生成所有论文图表
+python main.py --phase paper_figures --band all
+
+# 单独运行论文图表生成器
+python paper_figures.py
+
+# 生成特定类型的图表
+python paper_figures.py  # 自动加载数据并生成论文图表
+
+2. 生成实验性图表
+
+# 生成所有10种实验性图表
+python run_experimental_figures.py
+
+# 生成指定编号的图表（1-10号图表）
+python run_experimental_figures.py --figures 1,3,5,7,9
+
+# 指定数据目录生成图表
+python run_experimental_figures.py --data_dir "./data" --figures all
+
+# 调试模式运行
+python run_experimental_figures.py --debug --figures 2,4,6,8
+
+3. 误差与敏感性分析
+
+# 整体误差分析
+python main.py --phase analyze --band all
+
+# 敏感性分析
+python main.py --phase sensitivity --band all
+
+# 生成误差分布图
+python -c "
+import sys
+sys.path.append('.')
+from error_analyzer import ErrorAnalyzer
+import pandas as pd
+# 加载数据并生成图表
+"
+
+四、实用工具命令
+1. 验证数据生成正确性
+
+# 验证样本数量
+python -c "
+import xarray as xr
+import pandas as pd
+from pathlib import Path
+
+bands = ['band1', 'band2', 'band3', 'band4', 'band5', 'band6']
+for band in bands:
+    file = Path(f'./data/simulation_results_{band}_parallel.nc')
+    if file.exists():
+        ds = xr.open_dataset(file)
+        print(f'{band}: {len(ds.to_dataframe())} 个样本')
+        ds.close()
+"
+
+# 验证数据列
+python -c "
+import xarray as xr
+import pandas as pd
+from pathlib import Path
+
+file = Path('./data/simulation_results_band6_parallel.nc')
+if file.exists():
+    ds = xr.open_dataset(file)
+    df = ds.to_dataframe()
+    print('可用列:', list(df.columns))
+    print('样本数:', len(df))
+    print('成功样本:', df['success'].sum() if 'success' in df.columns else 'N/A')
+    ds.close()
+"
+
+
+五、常用组合命令
+1. 完整工作流命令
+
+# 第1步：生成所有波段数据
+python batch_parallel.py --bands all --n_workers 8 --mode full
+
+# 第2步：检查数据完整性
+python check_data_integrity.py --detailed --output_dir ./reports
+
+# 第3步：生成论文图表
+python main.py --phase paper_figures --band all
+
+# 第4步：生成实验性图表
+python run_experimental_figures.py --figures all
+
+2. 快速测试工作流
+# 使用band6进行快速测试
+python batch_parallel.py --band band6 --n_workers 4 --chunk_size 50
+python check_data_integrity.py --data_dir ./data
+python run_experimental_figures.py --figures 1,2,3
