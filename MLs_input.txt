@@ -1,0 +1,11 @@
+# 显示详细进度（默认）
+python MLs.py --models all --show_progress
+
+# 只训练特定模型，显示进度
+python MLs.py --models RandomForest,XGBoost,SVR --show_progress
+
+# 不显示进度（与之前版本相同）
+python MLs.py --models all --show_progress=False
+
+# 创建查找表并显示进度
+python MLs.py --models all --create_lut --lut_model RandomForest --show_progress
