@@ -215,7 +215,7 @@ class DataLoader:
 
                 # 确保有必需的特征
                 if 'raa' not in df.columns:
-                    df['raa'] = df.get('phi', 0.0)
+                    df['raa'] = df.get('raa', 0.0) #df['raa'] = df.get('phi', 0.0)
 
                 if 'rho_toa' not in df.columns:
                     df['rho_toa'] = df.get('rho_true', 0.2) * 0.7 + 0.05

@@ -1,0 +1,201 @@
+以下是完整的分步运行命令大全，方便您逐步执行各个阶段：
+
+## **1. 生成训练数据（蒙特卡洛采样）**
+
+### 方式A：生成单个波段
+```bash
+# 只生成 band3 的训练数据（5000个样本）
+python main_workflow.py --training_samples 5000 --bands band3 --n_workers 8
+```
+
+### 方式B：生成所有波段
+```bash
+# 生成所有波段的训练数据
+python main_flow.py --training_samples 5000 --bands all --n_workers 8
+```
+
+### 方式C：指定多个波段
+```bash
+# 生成特定波段的训练数据
+python main_workflow.py --training_samples 5000 --bands "band1,band3,band5" --n_workers 8
+```
+
+## **2. 生成验证网格数据**
+
+### 方式A：与训练数据同时生成
+```bash
+# 生成训练数据的同时生成验证网格
+python main_workflow.py --training_samples 5000 --validation_grid --bands band3 --n_workers 8
+```
+
+### 方式B：单独生成验证网格
+```bash
+# 仅生成验证网格（不生成训练数据）
+python main_workflow.py --validation_grid --bands band3 --n_workers 8
+# 注：如果不指定--training_samples，会使用默认值1000
+```
+
+## **3. 训练机器学习模型**
+
+### 方式A：使用完整流水线（训练+评估）
+```bash
+# 训练并评估所有模型
+python ml_pipeline.py full --sample 0.5 --models "RandomForest,XGBoost,LightGBM" --cv_folds 5 --n_jobs 8
+
+# 训练并评估指定模型
+python ml_pipeline.py full --sample 0.3 --models "RandomForest,XGBoost" --cv_folds 3 --n_jobs 4
+```
+
+### 方式B：只训练模型（不评估）
+```bash
+# 仅训练模型
+python ml_pipeline.py train --sample 0.5 --models "RandomForest,XGBoost,LightGBM" --cv_folds 5 --n_jobs 8
+
+# 或者直接使用 model_trainer.py
+python model_trainer.py --sample 0.5 --models "RandomForest,XGBoost" --test_size 0.2 --cv_folds 5 --n_jobs 8
+```
+
+### 方式C：只评估已有模型
+```bash
+# 评估已保存的模型
+python ml_pipeline.py evaluate --saved_dir "./models/model_training_20240101_120000/" --sample 0.3
+
+# 或者直接使用 model_evaluator.py
+python model_evaluator.py --saved_dir "./models/model_training_20240101_120000/" --sample 0.3 --no_shap
+```
+
+## **4. 生成业务化LUT**
+
+### 方式A：使用已训练的最佳模型
+```bash
+# 假设最佳模型是 RandomForest
+python main_workflow.py --generate_lut --ml_model_path "./models/model_training_20240101_120000/models/RandomForest_model.pkl"
+```
+
+### 方式B：直接运行 LUT 生成器
+```bash
+# 直接调用 LUT 生成器
+python lut_generator.py --ml_model_path "./models/model_training_20240101_120000/models/RandomForest_model.pkl" --output_path "./results/operational_lut_final.nc"
+```
+
+## **5. 分步执行完整流程**
+
+### 步骤1：生成训练数据
+```bash
+# 第一阶段：生成训练数据
+python main_workflow.py --training_samples 10000 --bands "band3" --n_workers 8
+```
+
+### 步骤2：生成验证网格
+```bash
+# 第二阶段：生成验证网格
+python main_workflow.py --validation_grid --bands "band3" --n_workers 8
+```
+
+### 步骤3：训练ML模型
+```bash
+# 第三阶段：训练模型（使用50%的数据）
+python ml_pipeline.py train --sample 0.5 --models "RandomForest,XGBoost" --cv_folds 5 --n_jobs 8
+```
+
+### 步骤4：评估模型
+```bash
+# 第四阶段：评估模型
+python ml_pipeline.py evaluate --saved_dir "./models/model_training_[最新时间戳]/" --sample 0.3 --no_shap
+```
+
+### 步骤5：生成LUT
+```bash
+# 第五阶段：生成LUT
+python main_workflow.py --generate_lut --ml_model_path "./models/model_training_[最新时间戳]/models/RandomForest_model.pkl"
+```
+
+## **6. 实用工具命令**
+
+### 查看数据统计
+```bash
+# 查看数据目录
+ls -la ./data/refactored/
+
+# 查看生成的NC文件信息
+python -c "import xarray as xr; ds = xr.open_dataset('./data/refactored/training_data_band3.nc'); print(ds)"
+```
+
+### 测试小规模运行
+```bash
+# 测试运行：少量样本，单个波段
+python main_workflow.py --training_samples 100 --bands band3 --n_workers 4
+
+# 测试ML训练：少量数据
+python ml_pipeline.py train --sample 0.1 --models "RandomForest" --cv_folds 3 --n_jobs 2
+```
+
+### 查看帮助信息
+```bash
+# 查看主工作流帮助
+python main_workflow.py --help
+
+# 查看ML流水线帮助
+python ml_pipeline.py --help
+
+# 查看模型训练帮助
+python model_trainer.py --help
+
+# 查看模型评估帮助
+python model_evaluator.py --help
+```
+
+## **7. 高级配置选项**
+
+### 自定义输出目录
+```bash
+# 为ML训练指定输出后缀
+python ml_pipeline.py train --sample 0.5 --models "RandomForest,XGBoost" --output_suffix "experiment_1"
+```
+
+### 禁用特征工程
+```bash
+# 不使用特征工程
+python ml_pipeline.py train --sample 0.5 --models "RandomForest" --no_feature_engineering
+```
+
+### 禁用SHAP分析
+```bash
+# 评估时禁用SHAP（加速）
+python model_evaluator.py --saved_dir "./models/..." --sample 0.3 --no_shap
+```
+
+## **8. 完整的单行命令示例**
+
+```bash
+# 完整流程（训练+验证+ML训练+LUT生成）
+python main_workflow.py --training_samples 5000 --validation_grid --bands band3 --n_workers 8 --train_ml --ml_models RandomForest --generate_lut --ml_model_path ./models/model_training_*/models/RandomForest_model.pkl
+```
+
+## **重要提示：**
+
+1. **路径问题**：请根据实际路径调整模型路径
+2. **内存限制**：大量样本可能需要大量内存，建议逐步增加样本数
+3. **并行工作**：`--n_workers` 建议设置为 CPU 核心数的 1/2 到 3/4
+4. **中间文件**：生成的数据保存在 `./data/refactored/` 目录，模型保存在 `./models/` 目录
+5. **时间估计**：生成大量样本可能需要数小时，建议从少量样本开始测试
+
+## **推荐的开发流程：**
+
+```bash
+# 1. 小规模测试
+python main_workflow.py --training_samples 100 --bands band3 --n_workers 2
+
+# 2. 小规模ML训练
+python ml_pipeline.py train --sample 0.1 --models "RandomForest" --cv_folds 3 --n_jobs 2
+
+# 3. 验证流程
+python ml_pipeline.py evaluate --saved_dir "./models/model_training_最新目录/" --sample 0.1
+
+# 4. 大规模运行（正式）
+python main_workflow.py --training_samples 50000 --bands all --n_workers 8
+python ml_pipeline.py train --sample 0.8 --models "RandomForest,XGBoost,LightGBM" --cv_folds 5 --n_jobs 8
+python main_workflow.py --generate_lut --ml_model_path "./models/model_training_最新目录/models/RandomForest_model.pkl"
+```
+
+这样分步执行可以更好地控制每个阶段，并能够在出现问题时更容易调试。
