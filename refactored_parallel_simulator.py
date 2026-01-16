@@ -1,7 +1,6 @@
-# ==================== parallel_simulator.py (修改版) ====================
+# ==================== refactored_parallel_simulator.py ====================
 """
-并行模拟器 - 重构版
-集成蒙特卡洛采样策略
+重构的并行模拟器 - 集成新的数据生成策略
 """
 import multiprocessing as mp
 from concurrent.futures import ProcessPoolExecutor, as_completed
@@ -16,7 +15,8 @@ from Py6S import *
 from tqdm import tqdm
 
 from config import ExperimentConfig
-from utils import setup_logger, monte_carlo_sample, calculate_physical_features
+from utils import setup_logger
+from data_generator import MonteCarloDataGenerator
 
 # 设置多进程启动方法
 mp.set_start_method('spawn', force=True)
@@ -49,7 +49,8 @@ class RefactoredSixSProcessWorker:
 
     def create_sixs_instance(self, params: Dict[str, float]) -> SixS:
         """
-        创建并配置6S实例 - 支持连续变量
+        创建并配置6S实例
+        支持连续随机变量
         """
         try:
             s = SixS()
@@ -101,18 +102,15 @@ class RefactoredSixSProcessWorker:
             print(f"创建6S实例失败: {e}")
             return None
 
-    def run_closed_loop(self, params: Dict[str, float]) -> Dict[str, Any]:
-        """
-        运行闭合循环模拟 - 包含物理特征
-        """
+    def run_forward_simulation(self, params: Dict[str, float]) -> Dict[str, Any]:
+        """运行正向模拟"""
         try:
-            # 1. 正向模拟
+            # 创建新的6S实例
             s = self.create_sixs_instance(params)
             if s is None:
                 return {
                     'success': False,
                     'error': '创建6S实例失败',
-                    'closed_loop_success': False,
                     **params
                 }
 
@@ -125,23 +123,7 @@ class RefactoredSixSProcessWorker:
             s.run()
             rho_toa = s.outputs.values['apparent_reflectance']
 
-            # 2. 反演模拟
-            s_inv = self.create_sixs_instance({k: v for k, v in params.items() if k != 'rho_true'})
-            if s_inv is None:
-                del s
-                gc.collect()
-                return {
-                    'success': False,
-                    'error': '创建反演6S实例失败',
-                    'closed_loop_success': False,
-                    **params
-                }
-
-            s_inv.atmos_corr = AtmosCorr.AtmosCorrLambertianFromReflectance(rho_toa)
-            s_inv.run()
-            rho_retrieved = s_inv.outputs.values['pixel_reflectance']
-
-            # 3. 计算物理特征
+            # 计算物理特征
             sza = params['sza']
             vza = params['vza']
             raa = params.get('raa', 0.0)
@@ -158,37 +140,86 @@ class RefactoredSixSProcessWorker:
             cos_scat = np.clip(cos_scat, -1.0, 1.0)
             scattering_angle = np.degrees(np.arccos(cos_scat))
 
-            # 4. 计算误差
-            error_abs = rho_retrieved - rho_true
-            error_rel = error_abs / rho_true if rho_true > 0 else np.nan
-
-            # 5. 清理实例
-            del s, s_inv
+            # 清理实例
+            del s
             gc.collect()
 
-            # 6. 返回结果
             return {
                 'success': True,
-                'closed_loop_success': True,
                 'rho_true': rho_true,
                 'rho_toa': rho_toa,
-                'rho_retrieved': rho_retrieved,
-                'error_absolute': error_abs,
-                'error_relative': error_rel,
                 'airmass_sza': airmass_sza,
                 'airmass_vza': airmass_vza,
                 'total_airmass': airmass_sza + airmass_vza,
                 'scattering_angle': scattering_angle,
                 'cos_sza': cos_sza,
                 'cos_vza': cos_vza,
-                'sza': sza,
-                'vza': vza,
-                'raa': raa,
+                'is_extreme': params.get('is_extreme', False)
+            }
+
+        except Exception as e:
+            error_msg = f"正向模拟失败: {str(e)}"
+            return {
+                'success': False,
+                'error': error_msg,
+                **params
+            }
+
+    def run_closed_loop(self, params: Dict[str, float]) -> Dict[str, Any]:
+        """
+        运行闭合循环模拟 - 包含所有物理特征
+        """
+        try:
+            # 1. 正向模拟
+            forward_result = self.run_forward_simulation(params)
+
+            if not forward_result.get('success', False):
+                return {
+                    **forward_result,
+                    'closed_loop_success': False,
+                    **params
+                }
+
+            # 2. 反演模拟
+            inv_params = {k: v for k, v in params.items() if k != 'rho_true'}
+
+            # 创建新的6S实例进行反演
+            s_inv = self.create_sixs_instance(inv_params)
+            if s_inv is None:
+                return {
+                    'success': False,
+                    'error': '创建反演6S实例失败',
+                    'closed_loop_success': False,
+                    **params
+                }
+
+            s_inv.atmos_corr = AtmosCorr.AtmosCorrLambertianFromReflectance(forward_result['rho_toa'])
+            s_inv.run()
+            rho_retrieved = s_inv.outputs.values['pixel_reflectance']
+
+            # 清理实例
+            del s_inv
+            gc.collect()
+
+            # 3. 计算误差
+            rho_true = params.get('rho_true', 0.2)
+            error_abs = rho_retrieved - rho_true
+            error_rel = error_abs / rho_true if rho_true > 0 else np.nan
+
+            return {
+                **forward_result,
+                'rho_retrieved': rho_retrieved,
+                'error_absolute': error_abs,
+                'error_relative': error_rel,
+                'closed_loop_success': True,
+                'success': True,
+                'sza': params['sza'],
+                'vza': params['vza'],
+                'raa': params.get('raa', 0.0),
                 'aod550': params.get('aod550', 0.2),
-                'h2o': params.get('h2o', 2.0),
-                'o3': params.get('o3', 0.3),
-                'wavelength': self.band_wavelength,
-                'band': params.get('band', 'unknown'),
+                'h2o': params.get('h2o', np.nan),
+                'o3': params.get('o3', np.nan),
+                'rho_true': rho_true,
                 'is_extreme': params.get('is_extreme', False),
                 **params
             }
@@ -209,143 +240,45 @@ class RefactoredParallelSimulator:
     def __init__(self, config: ExperimentConfig = None, logger=None):
         self.config = config or ExperimentConfig
         self.logger = logger or setup_logger('RefactoredParallelSimulator')
+        self.data_generator = MonteCarloDataGenerator(config, logger)
 
-    def generate_monte_carlo_dataset(self, bands: List[str] = None,
-                                     n_samples_per_band: int = None,
-                                     strategy: str = None) -> Dict[str, List[Dict]]:
+    def generate_training_dataset(self, total_samples_per_band: int = 50000,
+                                  bands: List[str] = None) -> Dict[str, List[Dict]]:
         """
-        生成蒙特卡洛数据集
-
-        Args:
-            bands: 波段列表，None表示所有波段
-            n_samples_per_band: 每波段样本数
-            strategy: 采样策略
-
-        Returns:
-            按波段分组的参数组合字典
+        生成训练数据集 - 蒙特卡洛混合采样
         """
-        if bands is None:
-            bands = list(self.config.BANDS.keys())
+        self.logger.info(f"生成训练数据集，每波段 {total_samples_per_band:,} 个样本")
 
-        if n_samples_per_band is None:
-            n_samples_per_band = self.config.MONTE_CARLO_CONFIG['total_samples_per_band']
+        # 生成混合采样数据集
+        training_data = self.data_generator.generate_mixed_sampling_dataset(
+            total_samples=total_samples_per_band,
+            bands=bands
+        )
 
-        if strategy is None:
-            strategy = self.config.MONTE_CARLO_CONFIG['sampling_strategy']
+        # 统计信息
+        total_combinations = sum(len(v) for v in training_data.values())
+        self.logger.info(f"训练数据集总计: {total_combinations:,} 个参数组合")
 
-        self.logger.info(f"生成蒙特卡洛数据集:")
-        self.logger.info(f"  波段: {bands}")
-        self.logger.info(f"  每波段样本数: {n_samples_per_band}")
-        self.logger.info(f"  采样策略: {strategy}")
-
-        all_combinations = {}
-
-        for band_id in bands:
-            self.logger.info(f"为波段 {band_id} 生成参数...")
-
-            # 采样参数
-            param_df = monte_carlo_sample(
-                param_ranges=self.config.PARAM_RANGES_CONTINUOUS,
-                n_samples=n_samples_per_band,
-                strategy=strategy,
-                random_seed=self.config.RANDOM_SEED
-            )
-
-            # 添加波段信息
-            wavelength = self.config.BANDS[band_id]['wavelength']
-            param_df['wavelength'] = wavelength
-            param_df['band'] = band_id
-
-            # 添加固定参数
-            param_df['atmos_profile'] = 'MidlatitudeSummer'
-            param_df['aero_profile'] = 'Continental'
-            param_df['target_altitude'] = self.config.SIXS_CONFIG['target_altitude']
-
-            # 标记极端角度
-            threshold = self.config.MONTE_CARLO_CONFIG['extreme_threshold']
-            param_df['is_extreme'] = (
-                    (param_df['sza'] > threshold) |
-                    (param_df['vza'] > threshold)
-            )
-
-            # 转换为参数列表
-            param_list = param_df.to_dict('records')
-            all_combinations[band_id] = param_list
-
-            # 统计信息
-            extreme_count = param_df['is_extreme'].sum()
-            extreme_ratio = extreme_count / len(param_df) * 100
-
-            self.logger.info(f"  波段 {band_id}: 生成 {len(param_list)} 个参数组合")
-            self.logger.info(f"  极端角度比例: {extreme_ratio:.1f}% ({extreme_count} 个)")
-
-        total_combinations = sum(len(v) for v in all_combinations.values())
-        self.logger.info(f"蒙特卡洛数据集总计: {total_combinations:,} 个参数组合")
-
-        return all_combinations
+        return training_data
 
     def generate_validation_grid(self, bands: List[str] = None) -> Dict[str, List[Dict]]:
         """
-        生成验证网格（稀疏规则网格）
+        生成验证网格 - 稀疏规则网格，仅用于可视化
         """
-        from itertools import product
+        self.logger.info("生成验证网格数据集")
 
-        if bands is None:
-            bands = list(self.config.BANDS.keys())
+        validation_data = self.data_generator.generate_validation_grid(bands)
 
-        grid_config = self.config.VALIDATION_GRID
-        all_combinations = {}
+        # 统计信息
+        total_combinations = sum(len(v) for v in validation_data.values())
+        self.logger.info(f"验证网格总计: {total_combinations:,} 个参数组合")
 
-        for band_id in bands:
-            wavelength = self.config.BANDS[band_id]['wavelength']
-            combinations = []
-
-            # 使用itertools生成所有组合
-            for values in product(
-                    grid_config['sza'],
-                    grid_config['vza'],
-                    grid_config['raa'],
-                    grid_config['rho_true'],
-                    grid_config['aod550'],
-                    grid_config['h2o'],
-                    grid_config['o3']
-            ):
-                sza, vza, raa, rho_true, aod550, h2o, o3 = values
-
-                params = {
-                    'sza': float(sza),
-                    'vza': float(vza),
-                    'raa': float(raa),
-                    'rho_true': float(rho_true),
-                    'aod550': float(aod550),
-                    'h2o': float(h2o),
-                    'o3': float(o3),
-                    'wavelength': wavelength,
-                    'band': band_id,
-                    'atmos_profile': 'MidlatitudeSummer',
-                    'aero_profile': 'Continental',
-                    'target_altitude': self.config.SIXS_CONFIG['target_altitude'],
-                    'is_extreme': self.config.MONTE_CARLO_CONFIG['extreme_threshold']
-                }
-
-                combinations.append(params)
-
-            all_combinations[band_id] = combinations
-            self.logger.info(f"验证网格 - 波段 {band_id}: {len(combinations)} 个组合")
-
-        return all_combinations
+        return validation_data
 
     def simulate_dataset(self, dataset: Dict[str, List[Dict]],
                          max_workers: int = None) -> Dict[str, pd.DataFrame]:
         """
         模拟数据集
-
-        Args:
-            dataset: 参数数据集
-            max_workers: 最大工作进程数
-
-        Returns:
-            模拟结果字典（按波段）
         """
         if max_workers is None:
             import multiprocessing as mp
@@ -441,7 +374,8 @@ class RefactoredParallelSimulator:
         band_id, param_list = task_batch
 
         # 获取波段波长
-        wavelength = self.config.BANDS[band_id]['wavelength']
+        band_config = self.config.BANDS[band_id]
+        wavelength = band_config['wavelength']
 
         # 创建工作器
         worker = RefactoredSixSProcessWorker(wavelength)
@@ -452,6 +386,11 @@ class RefactoredParallelSimulator:
             try:
                 # 运行模拟
                 result = worker.run_closed_loop(params)
+
+                # 添加波段信息
+                result['band'] = band_id
+                result['wavelength'] = wavelength
+
                 results.append(result)
 
                 # 定期清理内存

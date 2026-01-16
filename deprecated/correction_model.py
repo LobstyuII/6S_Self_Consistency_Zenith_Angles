@@ -4,7 +4,7 @@
 """
 import numpy as np
 import pandas as pd
-from typing import Dict, List, Tuple, Optional
+from typing import Dict, List, Tuple
 from pathlib import Path
 from scipy import interpolate
 from scipy.optimize import curve_fit

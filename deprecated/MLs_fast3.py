@@ -6,28 +6,21 @@
 import numpy as np
 import pandas as pd
 import xarray as xr
-from pathlib import Path
 import pickle
 import json
 import time
-import psutil
-from typing import Dict, List, Tuple, Optional, Any
+from typing import Dict, List, Tuple
 import warnings
 import sys
-import math
 
 warnings.filterwarnings('ignore')
 
 # 机器学习库
-from sklearn.model_selection import train_test_split, cross_val_score, GridSearchCV, RandomizedSearchCV, KFold
+from sklearn.model_selection import train_test_split, GridSearchCV, RandomizedSearchCV, KFold
 from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
-from sklearn.ensemble import RandomForestRegressor, GradientBoostingRegressor, ExtraTreesRegressor
-from sklearn.svm import SVR
-from sklearn.neural_network import MLPRegressor
-from sklearn.linear_model import Ridge, Lasso, ElasticNet
-from sklearn.decomposition import PCA
-from sklearn.feature_selection import VarianceThreshold
+from sklearn.ensemble import RandomForestRegressor
+from sklearn.linear_model import Ridge, ElasticNet
 
 # 高级模型
 try:
@@ -47,8 +40,6 @@ except ImportError:
     print("警告: LightGBM未安装，将跳过LightGBM模型")
 
 # 可视化
-import matplotlib.pyplot as plt
-import seaborn as sns
 
 from config import ExperimentConfig
 from utils import setup_logger

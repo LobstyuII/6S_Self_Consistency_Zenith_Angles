@@ -5,15 +5,11 @@
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
-from typing import Dict, List, Optional, Tuple, Any
+from typing import Optional
 from pathlib import Path
 import xarray as xr
 from scipy import stats, interpolate
-from scipy.optimize import curve_fit
-from mpl_toolkits.mplot3d import Axes3D
-import matplotlib.gridspec as gridspec
 import seaborn as sns
-from tqdm import tqdm
 import warnings
 
 warnings.filterwarnings('ignore')
@@ -1155,7 +1151,6 @@ class ExperimentalFiguresGenerator:
                     label='LUT节点')
 
         # 绘制3D曲面（插值后的表面）
-        from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 
         # 创建更密集的网格用于曲面绘制
         sza_dense = np.linspace(0, 80, 20)

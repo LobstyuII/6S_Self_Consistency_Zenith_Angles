@@ -9,16 +9,13 @@ import pickle
 import json
 import time
 import psutil
-import sys
 import warnings
-from pathlib import Path
-from typing import Dict, List, Tuple, Optional, Any
+from typing import Dict, List
 from datetime import datetime
 
 # 机器学习库
-from sklearn.model_selection import train_test_split, cross_val_score, GridSearchCV, RandomizedSearchCV, KFold
-from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score, explained_variance_score
-from sklearn.ensemble import RandomForestRegressor, GradientBoostingRegressor, ExtraTreesRegressor
+from sklearn.model_selection import GridSearchCV, RandomizedSearchCV, KFold
+from sklearn.ensemble import RandomForestRegressor, GradientBoostingRegressor
 from sklearn.svm import SVR
 from sklearn.neural_network import MLPRegressor
 from sklearn.linear_model import Ridge, Lasso, ElasticNet

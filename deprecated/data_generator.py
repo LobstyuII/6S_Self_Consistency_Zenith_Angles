@@ -2,9 +2,8 @@
 """
 数据生成模块
 """
-import concurrent.futures
 from multiprocessing import Pool, cpu_count
-from typing import Dict, List, Tuple, Optional, Any
+from typing import Dict, Tuple, Any
 import numpy as np
 from Py6S import *
 import pandas as pd

@@ -7,12 +7,9 @@
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
-from typing import Dict, List, Optional, Tuple, Any
+from typing import Dict, List, Optional
 from pathlib import Path
 import xarray as xr
-from scipy import stats
-import matplotlib.gridspec as gridspec
-import seaborn as sns
 import warnings
 from matplotlib.colors import LinearSegmentedColormap, Normalize
 from matplotlib.cm import ScalarMappable

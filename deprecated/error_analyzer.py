@@ -5,11 +5,9 @@
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
-from typing import Dict, List, Any, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 from pathlib import Path
 from scipy import stats
-import matplotlib.gridspec as gridspec
-from mpl_toolkits.mplot3d import Axes3D
 from scipy.interpolate import griddata
 
 from config import ExperimentConfig

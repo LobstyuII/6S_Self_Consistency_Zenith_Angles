@@ -4,14 +4,12 @@
 提供一站式训练和评估功能
 """
 import argparse
-from pathlib import Path
 from datetime import datetime
 import sys
 
 from config import ExperimentConfig
-from data_loader import DataLoader
-from model_trainer import ModelTrainer, train_main
-from model_evaluator import ModelEvaluator, evaluate_main
+from model_trainer import train_main
+from model_evaluator import evaluate_main
 
 
 class MLPipeline:

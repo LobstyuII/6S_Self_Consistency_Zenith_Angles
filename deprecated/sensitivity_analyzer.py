@@ -5,10 +5,9 @@
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
-from typing import Dict, List, Optional
+from typing import Dict, Optional
 from pathlib import Path
 from scipy import stats
-import matplotlib.gridspec as gridspec
 
 from config import ExperimentConfig
 from utils import setup_logger

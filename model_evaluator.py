@@ -8,9 +8,8 @@ import pandas as pd
 import pickle
 import json
 import matplotlib.pyplot as plt
-import seaborn as sns
 from pathlib import Path
-from typing import Dict, List, Tuple, Optional, Any
+from typing import Dict, Tuple, Any
 from datetime import datetime
 import warnings
 
@@ -28,7 +27,6 @@ except ImportError:
     print("Warning: SHAP not installed, skipping SHAP analysis")
 
 # 可视化库
-from matplotlib import cm
 import plotly.graph_objects as go
 
 # 统计库
@@ -59,7 +57,7 @@ plt.rcParams.update({
 })
 
 # 自定义颜色映射（与plot2相同风格）
-from matplotlib.colors import LinearSegmentedColormap, Normalize
+from matplotlib.colors import LinearSegmentedColormap
 
 ERROR_COLORS = [
     (0.0, 0.15, 0.7),  # 深蓝色

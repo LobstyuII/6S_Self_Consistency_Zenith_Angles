@@ -8,12 +8,11 @@
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
-from typing import Dict, List, Optional, Tuple, Any
+from typing import Dict, List, Optional
 from pathlib import Path
 import xarray as xr
 from scipy import stats
 import warnings
-from matplotlib.colors import LinearSegmentedColormap, Normalize
 import matplotlib.gridspec as gridspec
 
 warnings.filterwarnings('ignore')
