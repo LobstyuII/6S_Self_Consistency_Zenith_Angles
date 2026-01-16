@@ -15,7 +15,7 @@ class ExperimentConfig:
     EXP_VERSION = "v2.0"
     EXP_DATE = datetime.now().strftime("%Y%m%d")
 
-    BASE_DIR = Path("D:/6S_Self_Consistency_Zenith_Angles")
+    BASE_DIR = Path("D:/6S_Self_Consistency_Zenith_Angles_v0.4")
     DATA_DIR = BASE_DIR / "data" / "refactored"  # 修改：新的数据目录
     RESULTS_DIR = BASE_DIR / "results" / "refactored"
     FIGURES_DIR = BASE_DIR / "figures" / "refactored"

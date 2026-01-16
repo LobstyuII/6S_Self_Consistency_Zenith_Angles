@@ -1,5 +1,5 @@
 # 生成训练数据（蒙特卡洛采样）
-python main_workflow.py --training_samples 50000 --bands band3 --n_workers 8
+python main_workflow.py --training_samples 5000 --bands band3 --n_workers 8
 
 # 生成验证网格（稀疏规则网格）
 python main_workflow.py --validation_grid --bands band3 --n_workers 8
