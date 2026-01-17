@@ -27,6 +27,8 @@ def run_refactored_workflow():
     # 数据生成参数
     parser.add_argument('--training_samples', type=int, default=50000,
                         help='每波段训练样本数')
+    parser.add_argument('--skip_training_gen', action='store_true',
+                        help='跳过训练数据生成阶段（仅用于只生成验证网格或直接进行训练时）')
     parser.add_argument('--validation_grid', action='store_true',
                         help='生成验证网格')
     parser.add_argument('--bands', type=str, default='all',
@@ -92,32 +94,49 @@ def run_refactored_workflow():
     output_dir = config.DATA_DIR
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    for band_id, df in training_results.items():
-        if len(df) > 0:
-            # 过滤成功样本
-            if 'success' in df.columns:
-                df_success = df[df['success']].copy() if df['success'].dtype == bool else df[df['success'] == 1].copy()
-            else:
-                df_success = df
+    if not args.skip_training_gen:
+        # 生成训练数据集（蒙特卡洛混合采样）
+        logger.info(f"开始生成训练数据 (每波段 {args.training_samples} 样本)...")
+        training_data = simulator.generate_training_dataset(
+            total_samples_per_band=args.training_samples,
+            bands=bands_to_process
+        )
 
-            if not df_success.empty:
-                output_file = output_dir / f"training_data_{band_id}.nc"
+        # 模拟训练数据集
+        logger.info("模拟训练数据集...")
+        training_results = simulator.simulate_dataset(
+            training_data,
+            max_workers=args.n_workers
+        )
 
-                # 转换为字典并保存
-                data_dict = {}
-                for col in df_success.columns:
-                    col_data = df_success[col].values
+        # 保存训练数据
+        for band_id, df in training_results.items():
+            if len(df) > 0:
+                # 过滤成功样本
+                if 'success' in df.columns:
+                    df_success = df[df['success']].copy() if df['success'].dtype == bool else df[
+                        df['success'] == 1].copy()
+                else:
+                    df_success = df
 
-                    if col_data.dtype == object:
-                        try:
-                            col_data = col_data.astype(str)
-                        except:
-                            col_data = np.array([str(x) if pd.notna(x) else '' for x in col_data])
+                if not df_success.empty:
+                    output_file = output_dir / f"training_data_{band_id}.nc"
 
-                    data_dict[col] = col_data
+                    # 转换为字典并保存
+                    data_dict = {}
+                    for col in df_success.columns:
+                        col_data = df_success[col].values
+                        if col_data.dtype == object:
+                            try:
+                                col_data = col_data.astype(str)
+                            except:
+                                col_data = np.array([str(x) if pd.notna(x) else '' for x in col_data])
+                        data_dict[col] = col_data
 
-                save_dataset(data_dict, output_file)
-                logger.info(f"保存训练数据: {output_file} ({len(df_success)} 样本)")
+                    save_dataset(data_dict, output_file)
+                    logger.info(f"保存训练数据: {output_file} ({len(df_success)} 样本)")
+    else:
+        logger.info(">>> 跳过训练数据生成阶段 <<<")
 
     # 生成验证网格（如果需要）
     if args.validation_grid:
