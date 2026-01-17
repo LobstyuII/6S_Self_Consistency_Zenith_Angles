@@ -27,6 +27,8 @@ def run_refactored_workflow():
     # 数据生成参数
     parser.add_argument('--training_samples', type=int, default=50000,
                         help='每波段训练样本数')
+    parser.add_argument('--skip_training_gen', action='store_true',
+                        help='跳过蒙特卡洛训练数据生成（仅生成验证网格或直接训练时使用）')
     parser.add_argument('--validation_grid', action='store_true',
                         help='生成验证网格')
     parser.add_argument('--bands', type=str, default='all',
@@ -69,91 +71,105 @@ def run_refactored_workflow():
     logger.info(f"处理波段: {bands_to_process}")
 
     # 1. 数据生成阶段
-    logger.info("\n" + "=" * 80)
-    logger.info("阶段1: 数据生成")
-    logger.info("=" * 80)
+    # 只有当需要生成训练数据 或者 需要生成验证网格时，才进入阶段1
+    if (not args.skip_training_gen) or args.validation_grid:
+        logger.info("\n" + "=" * 80)
+        logger.info("阶段1: 数据生成")
+        logger.info("=" * 80)
 
-    simulator = RefactoredParallelSimulator(config, logger)
+        simulator = RefactoredParallelSimulator(config, logger)
+        output_dir = config.DATA_DIR
+        output_dir.mkdir(parents=True, exist_ok=True)
 
-    # 生成训练数据集（蒙特卡洛混合采样）
-    training_data = simulator.generate_training_dataset(
-        total_samples_per_band=args.training_samples,
-        bands=bands_to_process
-    )
+        # --- 子任务 A: 训练数据生成 ---
+        if not args.skip_training_gen:
+            logger.info(">>> 子任务 A: 生成蒙特卡洛训练数据集")
+            logger.info(f"    目标样本数: {args.training_samples}/波段")
 
-    # 模拟训练数据集
-    logger.info("模拟训练数据集...")
-    training_results = simulator.simulate_dataset(
-        training_data,
-        max_workers=args.n_workers
-    )
+            # 生成训练数据集（蒙特卡洛混合采样）
+            training_data = simulator.generate_training_dataset(
+                total_samples_per_band=args.training_samples,
+                bands=bands_to_process
+            )
 
-    # 保存训练数据
-    output_dir = config.DATA_DIR
-    output_dir.mkdir(parents=True, exist_ok=True)
+            # 模拟训练数据集
+            logger.info("    开始模拟计算...")
+            training_results = simulator.simulate_dataset(
+                training_data,
+                max_workers=args.n_workers
+            )
 
-    for band_id, df in training_results.items():
-        if len(df) > 0:
-            # 过滤成功样本
-            if 'success' in df.columns:
-                df_success = df[df['success']].copy() if df['success'].dtype == bool else df[df['success'] == 1].copy()
-            else:
-                df_success = df
+            # 保存训练数据
+            for band_id, df in training_results.items():
+                if len(df) > 0:
+                    # 过滤成功样本
+                    if 'success' in df.columns:
+                        df_success = df[df['success']].copy() if df['success'].dtype == bool else df[
+                            df['success'] == 1].copy()
+                    else:
+                        df_success = df
 
-            if not df_success.empty:
-                output_file = output_dir / f"training_data_{band_id}.nc"
+                    if not df_success.empty:
+                        output_file = output_dir / f"training_data_{band_id}.nc"
 
-                # 转换为字典并保存
-                data_dict = {}
-                for col in df_success.columns:
-                    col_data = df_success[col].values
+                        # 转换为字典并保存
+                        data_dict = {}
+                        for col in df_success.columns:
+                            col_data = df_success[col].values
 
-                    if col_data.dtype == object:
-                        try:
-                            col_data = col_data.astype(str)
-                        except:
-                            col_data = np.array([str(x) if pd.notna(x) else '' for x in col_data])
+                            if col_data.dtype == object:
+                                try:
+                                    col_data = col_data.astype(str)
+                                except:
+                                    col_data = np.array([str(x) if pd.notna(x) else '' for x in col_data])
 
-                    data_dict[col] = col_data
+                            data_dict[col] = col_data
 
-                save_dataset(data_dict, output_file)
-                logger.info(f"保存训练数据: {output_file} ({len(df_success)} 样本)")
+                        save_dataset(data_dict, output_file)
+                        logger.info(f"    保存训练数据: {output_file} ({len(df_success)} 样本)")
+        else:
+            logger.info(">>> 跳过训练数据生成 (由 --skip_training_gen 控制)")
 
-    # 生成验证网格（如果需要）
-    if args.validation_grid:
-        logger.info("\n生成验证网格...")
-        validation_data = simulator.generate_validation_grid(bands_to_process)
+        # --- 子任务 B: 验证网格生成 ---
+        if args.validation_grid:
+            logger.info("\n>>> 子任务 B: 生成固定验证网格")
+            validation_data = simulator.generate_validation_grid(bands_to_process)
 
-        validation_results = simulator.simulate_dataset(
-            validation_data,
-            max_workers=args.n_workers
-        )
+            logger.info("    开始模拟计算...")
+            validation_results = simulator.simulate_dataset(
+                validation_data,
+                max_workers=args.n_workers
+            )
 
-        for band_id, df in validation_results.items():
-            if len(df) > 0:
-                if 'success' in df.columns:
-                    df_success = df[df['success']].copy() if df['success'].dtype == bool else df[
-                        df['success'] == 1].copy()
-                else:
-                    df_success = df
+            for band_id, df in validation_results.items():
+                if len(df) > 0:
+                    if 'success' in df.columns:
+                        df_success = df[df['success']].copy() if df['success'].dtype == bool else df[
+                            df['success'] == 1].copy()
+                    else:
+                        df_success = df
 
-                if not df_success.empty:
-                    output_file = output_dir / f"validation_grid_{band_id}.nc"
+                    if not df_success.empty:
+                        output_file = output_dir / f"validation_grid_{band_id}.nc"
 
-                    data_dict = {}
-                    for col in df_success.columns:
-                        col_data = df_success[col].values
+                        data_dict = {}
+                        for col in df_success.columns:
+                            col_data = df_success[col].values
 
-                        if col_data.dtype == object:
-                            try:
-                                col_data = col_data.astype(str)
-                            except:
-                                col_data = np.array([str(x) if pd.notna(x) else '' for x in col_data])
+                            if col_data.dtype == object:
+                                try:
+                                    col_data = col_data.astype(str)
+                                except:
+                                    col_data = np.array([str(x) if pd.notna(x) else '' for x in col_data])
 
-                        data_dict[col] = col_data
+                            data_dict[col] = col_data
 
-                    save_dataset(data_dict, output_file)
-                    logger.info(f"保存验证网格: {output_file} ({len(df_success)} 样本)")
+                        save_dataset(data_dict, output_file)
+                        logger.info(f"    保存验证网格: {output_file} ({len(df_success)} 样本)")
+    else:
+        logger.info("\n" + "=" * 80)
+        logger.info("阶段1: 数据生成 (已完全跳过)")
+        logger.info("=" * 80)
 
     # 2. 机器学习阶段
     if args.train_ml:

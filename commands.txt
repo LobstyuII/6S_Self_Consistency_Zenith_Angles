@@ -31,8 +31,7 @@ python main_workflow.py --training_samples 5000 --validation_grid --bands band3 
 ### 方式B：单独生成验证网格
 ```bash
 # 仅生成验证网格（不生成训练数据）
-python main_workflow.py --validation_grid --bands band3 --n_workers 8
-# 注：如果不指定--training_samples，会使用默认值1000
+python main_workflow.py --validation_grid --skip_training_gen --n_workers 8
 ```
 
 ## **3. 训练机器学习模型**
@@ -83,25 +82,25 @@ python lut_generator.py --ml_model_path "./models/model_training_20240101_120000
 ### 步骤1：生成训练数据
 ```bash
 # 第一阶段：生成训练数据
-python main_workflow.py --training_samples 10000 --bands "band3" --n_workers 8
+python main_workflow.py --training_samples 50000 --n_workers 8
 ```
 
 ### 步骤2：生成验证网格
 ```bash
 # 第二阶段：生成验证网格
-python main_workflow.py --validation_grid --bands "band3" --n_workers 8
+python main_workflow.py --validation_grid --n_workers 8
 ```
 
 ### 步骤3：训练ML模型
 ```bash
 # 第三阶段：训练模型（使用50%的数据）
-python ml_pipeline.py train --sample 0.5 --models "RandomForest,XGBoost" --cv_folds 5 --n_jobs 8
+python ml_pipeline.py train --sample 1 --models "RandomForest,XGBoost" --test_size 0.2 --cv_folds 5 --n_jobs 8
 ```
 
 ### 步骤4：评估模型
 ```bash
 # 第四阶段：评估模型
-python ml_pipeline.py evaluate --saved_dir "D:\6S_Self_Consistency_Zenith_Angles_v0.4\models\refactored\model_training_20260117_072700\models" --sample 0.3
+python ml_pipeline.py evaluate --saved_dir "D:\6S_Self_Consistency_Zenith_Angles_v0.4\models\refactored\model_training_20260117_152723" --sample 1
 ```
 
 ### 步骤5：生成LUT
