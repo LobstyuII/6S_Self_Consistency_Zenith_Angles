@@ -329,8 +329,8 @@ class ModelEvaluator:
         metrics['Q90_Error'] = np.percentile(np.abs(residuals), 90)
 
         # 保存预测值
-        metrics['y_true'] = y_true.values
-        metrics['y_pred'] = y_pred
+        metrics['y_true'] = y_true.values.tolist()
+        metrics['y_pred'] = y_pred.tolist()
 
         return metrics
 
@@ -668,8 +668,8 @@ class ModelEvaluator:
         for idx, (model_name, metrics) in enumerate(list(self.results.items())[:len(axes)]):
             ax = axes[idx]
 
-            y_true = metrics['y_true']
-            y_pred = metrics['y_pred']
+            y_true = np.array(metrics['y_true'])
+            y_pred = np.array(metrics['y_pred'])
             errors = y_true - y_pred
 
             # 误差直方图

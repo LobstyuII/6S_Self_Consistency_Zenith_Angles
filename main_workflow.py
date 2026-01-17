@@ -89,7 +89,7 @@ def run_refactored_workflow():
     )
 
     # 保存训练数据
-    output_dir = config.DATA_DIR / "refactored"
+    output_dir = config.DATA_DIR
     output_dir.mkdir(parents=True, exist_ok=True)
 
     for band_id, df in training_results.items():

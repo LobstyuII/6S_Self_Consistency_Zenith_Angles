@@ -176,7 +176,7 @@ class DataLoader:
         print("=" * 70)
         print("📂 加载数据...")
 
-        data_files = list(self.config.DATA_DIR.glob("simulation_results_*.nc"))
+        data_files = list(self.config.DATA_DIR.glob("training_data_*.nc"))
 
         if not data_files:
             raise FileNotFoundError(f"在目录 {self.config.DATA_DIR} 中找不到数据文件")
@@ -200,7 +200,7 @@ class DataLoader:
                 df = ds.to_dataframe().reset_index(drop=True)
 
                 # 添加波段信息
-                band_name = file.stem.replace("simulation_results_", "").replace("_parallel", "")
+                band_name = file.stem.replace("training_data_", "").replace("_parallel", "")
                 df['band'] = band_name
 
                 # 添加波长

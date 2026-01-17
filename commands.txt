@@ -101,7 +101,7 @@ python ml_pipeline.py train --sample 0.5 --models "RandomForest,XGBoost" --cv_fo
 ### 步骤4：评估模型
 ```bash
 # 第四阶段：评估模型
-python ml_pipeline.py evaluate --saved_dir "./models/model_training_[最新时间戳]/" --sample 0.3 --no_shap
+python ml_pipeline.py evaluate --saved_dir "D:\6S_Self_Consistency_Zenith_Angles_v0.4\models\refactored\model_training_20260117_072700\models" --sample 0.3
 ```
 
 ### 步骤5：生成LUT
@@ -184,10 +184,10 @@ python main_workflow.py --training_samples 5000 --validation_grid --bands band3 
 
 ```bash
 # 1. 小规模测试
-python main_workflow.py --training_samples 100 --bands band3 --n_workers 2
+python main_workflow.py --training_samples 100 --bands band3 --n_workers 8
 
 # 2. 小规模ML训练
-python ml_pipeline.py train --sample 0.1 --models "RandomForest" --cv_folds 3 --n_jobs 2
+python ml_pipeline.py train --sample 0.1 --models "RandomForest" --cv_folds 3 --n_jobs 8
 
 # 3. 验证流程
 python ml_pipeline.py evaluate --saved_dir "./models/model_training_最新目录/" --sample 0.1
@@ -195,7 +195,5 @@ python ml_pipeline.py evaluate --saved_dir "./models/model_training_最新目录
 # 4. 大规模运行（正式）
 python main_workflow.py --training_samples 50000 --bands all --n_workers 8
 python ml_pipeline.py train --sample 0.8 --models "RandomForest,XGBoost,LightGBM" --cv_folds 5 --n_jobs 8
-python main_workflow.py --generate_lut --ml_model_path "./models/model_training_最新目录/models/RandomForest_model.pkl"
+python main_workflow.py --generate_lut --ml_model_path r"D:\6S_Self_Consistency_Zenith_Angles_v0.4\models\refactored/RandomForest_model.pkl"
 ```
-
-这样分步执行可以更好地控制每个阶段，并能够在出现问题时更容易调试。
