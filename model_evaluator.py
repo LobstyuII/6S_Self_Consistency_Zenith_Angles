@@ -31,6 +31,7 @@ import plotly.graph_objects as go
 
 # 统计库
 from scipy import stats
+from scipy.stats import gaussian_kde
 
 # 项目模块
 from config import ExperimentConfig
@@ -93,6 +94,17 @@ SCATTER_COLORS = [
     (0.5, 0.1, 0.6),  # 紫色
 ]
 SCATTER_CMAP = LinearSegmentedColormap.from_list('scatter_cmap', SCATTER_COLORS, N=256)
+
+# Hexbin图颜色映射 - 密度相关
+HEXBIN_COLORS = [
+    (0.95, 0.95, 0.95),  # 浅灰色
+    (0.8, 0.8, 0.8),  # 浅中灰
+    (0.6, 0.6, 0.6),  # 中灰色
+    (0.4, 0.4, 0.4),  # 深灰色
+    (0.2, 0.2, 0.2),  # 深灰色
+    (0.1, 0.1, 0.1),  # 近黑色
+]
+HEXBIN_CMAP = LinearSegmentedColormap.from_list('hexbin_cmap', HEXBIN_COLORS, N=256)
 
 
 class ModelEvaluator:
@@ -352,38 +364,60 @@ class ModelEvaluator:
         # 4. 预测误差分布图
         self._plot_error_distribution()
 
-        # 5. SHAP分析（如果可用）
+        # 5. Hexbin密度图（新增）
+        self._plot_hexbin_scatter(X_test, y_test)
+
+        # 6. SHAP分析（如果可用）
         if self.use_shap and self.models:
             self._perform_shap_analysis(X_test)
 
-        # 6. 交互式3D图
+        # 7. 交互式3D图
         self._plot_interactive_3d()
 
         print(f"All plots saved to: {self.plots_dir}")
 
     def _plot_model_comparison(self, results_df: pd.DataFrame):
-        """绘制模型比较图"""
+        """绘制模型比较图 - 修复了同一组内柱子颜色相同的问题"""
         fig, axes = plt.subplots(2, 3, figsize=(18, 12))
 
-        # 1. RMSE和MAE比较
+        # 1. RMSE和MAE比较 - 修复颜色问题
         ax = axes[0, 0]
         x = np.arange(len(results_df))
         width = 0.35
 
-        # 获取颜色
-        colors = [MODEL_COLORS.get(m, '#1f77b4') for m in results_df['Model']]
+        # 为每个指标分配不同颜色
+        rmse_color = '#1f77b4'  # 蓝色
+        mae_color = '#ff7f0e'  # 橙色
 
-        ax.bar(x - width / 2, results_df['RMSE'], width, label='RMSE',
-               alpha=0.8, color=[c for c in colors])
-        ax.bar(x + width / 2, results_df['MAE'], width, label='MAE',
-               alpha=0.8, color=[c for c in colors])
+        # 绘制柱子
+        for i, (_, row) in enumerate(results_df.iterrows()):
+            model_name = row['Model']
+            # 每个模型使用相同的颜色映射
+            model_color = MODEL_COLORS.get(model_name, '#1f77b4')
+
+            # RMSE柱子
+            ax.bar(i - width / 2, row['RMSE'], width,
+                   color=rmse_color, alpha=0.7, edgecolor='black')
+
+            # MAE柱子
+            ax.bar(i + width / 2, row['MAE'], width,
+                   color=mae_color, alpha=0.7, edgecolor='black')
+
+        # 添加图例
+        from matplotlib.patches import Patch
+        legend_elements = [
+            Patch(facecolor=rmse_color, alpha=0.7, edgecolor='black', label='RMSE'),
+            Patch(facecolor=mae_color, alpha=0.7, edgecolor='black', label='MAE')
+        ]
+        ax.legend(handles=legend_elements, fontsize=8, frameon=False)
+
         ax.set_xlabel('Model', fontsize=9)
         ax.set_ylabel('Error', fontsize=9)
         ax.set_title('Model Error Comparison', fontsize=10, fontweight='bold')
         ax.set_xticks(x)
         ax.set_xticklabels(results_df['Model'], rotation=45, ha='right', fontsize=8)
-        ax.legend(fontsize=8, frameon=False)
         ax.grid(True, alpha=0.2, linestyle='--')
+
         for spine in ['top', 'right']:
             ax.spines[spine].set_visible(False)
         for spine in ['bottom', 'left']:
@@ -392,7 +426,10 @@ class ModelEvaluator:
 
         # 2. R²比较
         ax = axes[0, 1]
-        bars = ax.bar(results_df['Model'], results_df['R2'], color=colors, alpha=0.8)
+        # 为每个模型使用对应的颜色
+        colors = [MODEL_COLORS.get(m, '#1f77b4') for m in results_df['Model']]
+        bars = ax.bar(results_df['Model'], results_df['R2'],
+                      color=colors, alpha=0.8, edgecolor='black')
         ax.set_xlabel('Model', fontsize=9)
         ax.set_ylabel('R²', fontsize=9)
         ax.set_title('Model Coefficient of Determination (R²) Comparison',
@@ -414,7 +451,8 @@ class ModelEvaluator:
 
         # 3. 预测偏差
         ax = axes[0, 2]
-        ax.bar(results_df['Model'], results_df['Bias'], alpha=0.8, color=colors)
+        ax.bar(results_df['Model'], results_df['Bias'],
+               alpha=0.8, color=colors, edgecolor='black')
         ax.axhline(y=0, color='r', linestyle='--', alpha=0.7, linewidth=1.2)
         ax.set_xlabel('Model', fontsize=9)
         ax.set_ylabel('Prediction Bias', fontsize=9)
@@ -429,7 +467,8 @@ class ModelEvaluator:
 
         # 4. MAPE比较
         ax = axes[1, 0]
-        ax.bar(results_df['Model'], results_df['MAPE'], alpha=0.8, color=colors)
+        ax.bar(results_df['Model'], results_df['MAPE'],
+               alpha=0.8, color=colors, edgecolor='black')
         ax.set_xlabel('Model', fontsize=9)
         ax.set_ylabel('MAPE (%)', fontsize=9)
         ax.set_title('Mean Absolute Percentage Error (MAPE)',
@@ -444,7 +483,8 @@ class ModelEvaluator:
 
         # 5. 解释方差
         ax = axes[1, 1]
-        ax.bar(results_df['Model'], results_df['Explained_Variance'], alpha=0.8, color=colors)
+        ax.bar(results_df['Model'], results_df['Explained_Variance'],
+               alpha=0.8, color=colors, edgecolor='black')
         ax.set_xlabel('Model', fontsize=9)
         ax.set_ylabel('Explained Variance', fontsize=9)
         ax.set_title('Model Explained Variance', fontsize=10, fontweight='bold')
@@ -458,7 +498,8 @@ class ModelEvaluator:
 
         # 6. 标准差
         ax = axes[1, 2]
-        ax.bar(results_df['Model'], results_df['Std_Residuals'], alpha=0.8, color=colors)
+        ax.bar(results_df['Model'], results_df['Std_Residuals'],
+               alpha=0.8, color=colors, edgecolor='black')
         ax.set_xlabel('Model', fontsize=9)
         ax.set_ylabel('Std of Residuals', fontsize=9)
         ax.set_title('Standard Deviation of Residuals', fontsize=10, fontweight='bold')
@@ -540,6 +581,208 @@ class ModelEvaluator:
         plt.savefig(self.plots_dir / "prediction_scatter_plots.png", dpi=600, bbox_inches='tight',
                     facecolor='white', edgecolor='none')
         plt.close()
+
+    def _plot_hexbin_scatter(self, X_test: pd.DataFrame, y_test: pd.Series):
+        """绘制专业的Hexbin散点图 - 科研红蓝配色版"""
+        print("   Generating professional hexbin scatter plots...")
+
+        # 1. 先计算所有模型的R²值，并按R²从大到小排序
+        model_performance = []
+        for model_name, model in self.models.items():
+            y_pred = model.predict(X_test)
+            r2 = r2_score(y_test, y_pred)
+            model_performance.append((model_name, model, r2, y_pred))
+
+        # 按R²从大到小排序
+        model_performance.sort(key=lambda x: x[2], reverse=True)
+
+        n_models = len(model_performance)
+        n_cols = min(3, n_models)
+        n_rows = (n_models + n_cols - 1) // n_cols
+
+        fig, axes = plt.subplots(n_rows, n_cols, figsize=(6 * n_cols, 5 * n_rows))
+        if n_models == 1:
+            axes = np.array([axes])
+        axes = axes.flatten()
+
+        # 定义科研红蓝配色
+        # 使用seaborn的diverging红蓝配色方案
+        try:
+            import seaborn as sns
+            # 使用seaborn的diverging红蓝配色
+            red_blue_cmap = sns.diverging_palette(240, 10, as_cmap=True)  # 从蓝色到红色
+            print("   Using seaborn red-blue diverging color palette")
+        except ImportError:
+            # 如果seaborn不可用，使用matplotlib的RdBu_r
+            red_blue_cmap = plt.cm.RdBu_r
+            print("   Using matplotlib RdBu_r color palette")
+
+        for idx, (model_name, model, r2_value, y_pred) in enumerate(model_performance[:len(axes)]):
+            ax = axes[idx]
+
+            # 计算残差（预测值 - 真实值）
+            residuals = y_pred - y_test
+
+            # 1. 计算数据范围，但保持对称
+            data_min = min(y_test.min(), y_pred.min())
+            data_max = max(y_test.max(), y_pred.max())
+            data_range = max(abs(data_min), abs(data_max))
+
+            # 设置坐标轴范围，保持对称
+            axis_limit = max(0.10, np.ceil(data_range * 10) / 10)  # 至少0.10，向上取整到0.1
+            ax.set_xlim(-axis_limit, axis_limit)
+            ax.set_ylim(-axis_limit, axis_limit)
+
+            # 确保1:1等比例显示
+            ax.set_aspect('equal')
+
+            # 2. 计算统计指标
+            n_samples = len(y_test)
+            rmse = np.sqrt(mean_squared_error(y_test, y_pred))
+            mae = mean_absolute_error(y_test, y_pred)
+
+            # 3. 绘制Hexbin散点热力图
+            # 使用科研红蓝配色，蓝色表示低密度，红色表示高密度
+            hexbin = ax.hexbin(y_test, y_pred, gridsize=60, cmap=red_blue_cmap,
+                               mincnt=1, edgecolors='none', alpha=0.9,
+                               zorder=4)
+
+            # 获取hexbin的计数值用于设置colorbar
+            counts = hexbin.get_array()
+
+            # 4. 绘制参考线
+            # 1:1参考线（黑色实线）
+            x_range = np.array([-axis_limit, axis_limit])
+            ax.plot(x_range, x_range, 'k-', linewidth=1.5,
+                    label='1:1 Line', zorder=5)
+
+            # 线性回归拟合线（黑色虚线）
+            if len(y_test) > 1:
+                # 计算线性回归
+                slope, intercept, r_value, p_value, std_err = stats.linregress(y_test, y_pred)
+                fit_line = slope * x_range + intercept
+                ax.plot(x_range, fit_line, 'k--', linewidth=1.5,
+                        label=f'Fit (slope={slope:.3f})', zorder=6)
+
+            # 5. 添加坐标轴标签
+            ax.set_xlabel('True Value', fontsize=11, fontweight='bold')
+            ax.set_ylabel('Predicted Value', fontsize=11, fontweight='bold')
+
+            # 6. 添加标题和统计信息
+            ax.set_title(f'{model_name} (R²={r2_value:.3f})\nn={n_samples:,}, RMSE={rmse:.4f}, MAE={mae:.4f}',
+                         fontsize=12, fontweight='bold', pad=12)
+
+            # 7. 添加网格线（更细更淡）
+            ax.grid(True, alpha=0.15, linestyle='-', linewidth=0.5, zorder=0)
+
+            # 8. 设置坐标轴边框
+            for spine in ax.spines.values():
+                spine.set_linewidth(1.0)
+                spine.set_color('black')
+
+            # 9. 设置刻度
+            ax.tick_params(axis='both', which='major', length=6, width=0.8,
+                           direction='out', labelsize=9)
+            ax.tick_params(axis='both', which='minor', length=3, width=0.5,
+                           direction='out', labelsize=7)
+
+            # 设置主要刻度，基于轴限制自动调整
+            # 自动计算合适的刻度间隔
+            if axis_limit <= 0.2:
+                tick_step = 0.05
+            elif axis_limit <= 0.5:
+                tick_step = 0.1
+            else:
+                tick_step = 0.2
+
+            major_ticks = np.arange(-axis_limit, axis_limit + tick_step / 2, tick_step)
+            ax.set_xticks(major_ticks)
+            ax.set_yticks(major_ticks)
+
+            # 设置次要刻度
+            minor_ticks = np.arange(-axis_limit, axis_limit + tick_step / 4, tick_step / 2)
+            ax.set_xticks(minor_ticks, minor=True)
+            ax.set_yticks(minor_ticks, minor=True)
+
+            # 10. 添加图例（只有1:1线和拟合线）
+            handles, labels = ax.get_legend_handles_labels()
+            if handles:
+                ax.legend(handles=handles, labels=labels,
+                          fontsize=9, frameon=True,
+                          framealpha=0.9, edgecolor='black',
+                          loc='upper left', bbox_to_anchor=(0.02, 0.98),
+                          borderaxespad=0.5, ncol=1)
+
+            # 11. 添加颜色条（右侧）- 修复版
+            if counts is not None and len(counts) > 0:
+                # 计算log10计数
+                log_counts = np.log10(counts)
+                min_log = np.min(log_counts)
+                max_log = np.max(log_counts)
+
+                # 创建新的ScalarMappable，使用log10值
+                from matplotlib.cm import ScalarMappable
+                from matplotlib.colors import Normalize
+
+                # 使用与hexbin相同的颜色映射
+                norm = Normalize(vmin=min_log, vmax=max_log)
+                sm = ScalarMappable(cmap=red_blue_cmap, norm=norm)
+                sm.set_array([])
+
+                # 创建颜色条
+                cbar = plt.colorbar(sm, ax=ax, shrink=0.8, pad=0.03)
+                cbar.set_label('log₁₀(Count)', fontsize=10, fontweight='bold')
+                cbar.ax.tick_params(labelsize=8)
+
+                # 设置更顺畅的刻度
+                # 计算合理的刻度间隔
+                log_range = max_log - min_log
+                if log_range <= 1.0:
+                    tick_step = 0.2
+                elif log_range <= 2.0:
+                    tick_step = 0.5
+                else:
+                    tick_step = 1.0
+
+                # 生成刻度
+                start_tick = np.floor(min_log / tick_step) * tick_step
+                end_tick = np.ceil(max_log / tick_step) * tick_step
+                ticks = np.arange(start_tick, end_tick + tick_step / 2, tick_step)
+
+                # 过滤掉超出范围的刻度
+                ticks = ticks[(ticks >= min_log - 0.1) & (ticks <= max_log + 0.1)]
+
+                if len(ticks) >= 2:
+                    cbar.set_ticks(ticks)
+                    # 格式化刻度标签
+                    tick_labels = []
+                    for tick in ticks:
+                        if tick.is_integer():
+                            tick_labels.append(f'{int(tick)}')
+                        elif abs(tick * 10 - round(tick * 10)) < 0.01:
+                            tick_labels.append(f'{tick:.1f}')
+                        else:
+                            tick_labels.append(f'{tick:.2f}')
+                    cbar.set_ticklabels(tick_labels)
+                else:
+                    # 如果刻度太少，使用默认的5个等间距刻度
+                    n_ticks = min(5, int(log_range * 2) + 1)
+                    if n_ticks >= 2:
+                        ticks = np.linspace(min_log, max_log, n_ticks)
+                        cbar.set_ticks(ticks)
+                        tick_labels = [f'{tick:.1f}' for tick in ticks]
+                        cbar.set_ticklabels(tick_labels)
+
+        # 隐藏多余的子图
+        for idx in range(len(model_performance), len(axes)):
+            axes[idx].set_visible(False)
+
+        plt.tight_layout()
+        plt.savefig(self.plots_dir / "hexbin_density_plots_red_blue.png",
+                    dpi=600, bbox_inches='tight',
+                    facecolor='white', edgecolor='none')
+        plt.close()
+        print("   Professional hexbin plots with red-blue color scheme saved successfully")
 
     def _plot_residual_analysis(self, X_test: pd.DataFrame, y_test: pd.Series):
         """绘制残差分析图"""
@@ -708,7 +951,7 @@ class ModelEvaluator:
         plt.close()
 
     def _perform_shap_analysis(self, X_test: pd.DataFrame):
-        """执行SHAP分析"""
+        """执行SHAP分析 - 添加包含所有特征的版本"""
         if not self.models:
             return
 
@@ -737,27 +980,48 @@ class ModelEvaluator:
                 explainer = shap.KernelExplainer(model.predict, X_sample[:100])
                 shap_values = explainer.shap_values(X_sample)
 
-            # 1. 特征重要性摘要图
+            # 1. 特征重要性摘要图（默认显示前20个特征）
             plt.figure(figsize=(10, 8))
-            shap.summary_plot(shap_values, X_sample, show=False)
-            plt.title(f'{best_model_name} - SHAP Feature Importance',
+            shap.summary_plot(shap_values, X_sample, show=False, max_display=20)
+            plt.title(f'{best_model_name} - SHAP Feature Importance (Top 20)',
                       fontsize=11, fontweight='bold')
             plt.tight_layout()
-            plt.savefig(self.plots_dir / f"{best_model_name}_shap_summary.png",
+            plt.savefig(self.plots_dir / f"{best_model_name}_shap_summary_top20.png",
                         dpi=600, bbox_inches='tight', facecolor='white', edgecolor='none')
             plt.close()
 
-            # 2. 条形图
+            # 2. 特征重要性摘要图（显示所有特征）
+            plt.figure(figsize=(12, 10))
+            shap.summary_plot(shap_values, X_sample, show=False, max_display=min(50, X_sample.shape[1]))
+            plt.title(f'{best_model_name} - SHAP Feature Importance (All Features)',
+                      fontsize=11, fontweight='bold')
+            plt.tight_layout()
+            plt.savefig(self.plots_dir / f"{best_model_name}_shap_summary_all.png",
+                        dpi=600, bbox_inches='tight', facecolor='white', edgecolor='none')
+            plt.close()
+
+            # 3. 条形图（默认显示前20个特征）
             plt.figure(figsize=(10, 6))
-            shap.summary_plot(shap_values, X_sample, plot_type="bar", show=False)
-            plt.title(f'{best_model_name} - SHAP Feature Importance (Bar Plot)',
+            shap.summary_plot(shap_values, X_sample, plot_type="bar", show=False, max_display=20)
+            plt.title(f'{best_model_name} - SHAP Feature Importance (Bar Plot - Top 20)',
                       fontsize=11, fontweight='bold')
             plt.tight_layout()
-            plt.savefig(self.plots_dir / f"{best_model_name}_shap_bar.png",
+            plt.savefig(self.plots_dir / f"{best_model_name}_shap_bar_top20.png",
                         dpi=600, bbox_inches='tight', facecolor='white', edgecolor='none')
             plt.close()
 
-            print("   SHAP analysis completed")
+            # 4. 条形图（显示所有特征）
+            plt.figure(figsize=(12, 8))
+            shap.summary_plot(shap_values, X_sample, plot_type="bar", show=False,
+                              max_display=min(50, X_sample.shape[1]))
+            plt.title(f'{best_model_name} - SHAP Feature Importance (Bar Plot - All Features)',
+                      fontsize=11, fontweight='bold')
+            plt.tight_layout()
+            plt.savefig(self.plots_dir / f"{best_model_name}_shap_bar_all.png",
+                        dpi=600, bbox_inches='tight', facecolor='white', edgecolor='none')
+            plt.close()
+
+            print("   SHAP analysis completed with both top 20 and all features plots")
 
         except Exception as e:
             print(f"   SHAP analysis failed: {e}")

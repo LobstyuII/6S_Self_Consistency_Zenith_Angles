@@ -1,6 +1,7 @@
-# ==================== data_generator.py ====================
+# ==================== data_generator.py (角度范围修复版) ====================
 """
 重构的数据生成模块 - 采用蒙特卡洛采样和极端角度过采样
+修复：验证网格现在正确读取配置文件中的设置
 """
 import numpy as np
 import pandas as pd
@@ -18,28 +19,38 @@ warnings.filterwarnings('ignore')
 class MonteCarloDataGenerator:
     """
     蒙特卡洛数据生成器
-    采用混合采样策略：70%常规采样 + 30%极端角度过采样
+    采用混合采样策略：60%常规采样 + 40%极端角度过采样
     """
 
     def __init__(self, config: ExperimentConfig = None, logger=None):
         self.config = config or ExperimentConfig
         self.logger = logger or setup_logger('MonteCarloDataGenerator')
 
-        # 极端角度阈值
-        self.extreme_threshold = 60.0  # 角度 > 60° 视为极端
-        self.regular_ratio = 0.7  # 70% 常规采样
-        self.extreme_ratio = 0.3  # 30% 极端角度过采样
+        # 采样参数从配置中读取
+        mc_config = getattr(self.config, 'MONTE_CARLO_CONFIG', {})
+        self.extreme_threshold = mc_config.get('extreme_threshold', 60.0)
+        self.regular_ratio = mc_config.get('regular_ratio', 0.6)  # 调整为0.6
+        self.extreme_ratio = mc_config.get('extreme_ratio', 0.4)  # 调整为0.4
 
         # 参数范围
-        self.param_ranges = {
-            'sza': {'min': 0.0, 'max': 85.0},
-            'vza': {'min': 0.0, 'max': 75.0},
-            'raa': {'min': 0.0, 'max': 180.0},
-            'rho_true': {'min': 0.01, 'max': 0.6},  # 连续范围
-            'aod550': {'min': 0.05, 'max': 1.0},  # 连续范围
-            'h2o': {'min': 0.5, 'max': 5.0},  # 连续范围
-            'o3': {'min': 0.2, 'max': 0.4},  # 连续范围
-        }
+        if hasattr(self.config, 'PARAM_RANGES_CONTINUOUS'):
+            # 扁平化配置以便于内部使用
+            self.param_ranges = {}
+            ranges = self.config.PARAM_RANGES_CONTINUOUS
+            if 'geometry' in ranges: self.param_ranges.update(ranges['geometry'])
+            if 'surface' in ranges: self.param_ranges.update(ranges['surface'])
+            if 'atmosphere' in ranges: self.param_ranges.update(ranges['atmosphere'])
+        else:
+            # 回退默认值
+            self.param_ranges = {
+                'sza': {'min': 0.0, 'max': 85.0},
+                'vza': {'min': 0.0, 'max': 85.0},  # 改为85°
+                'raa': {'min': 0.0, 'max': 180.0},
+                'rho_true': {'min': 0.01, 'max': 0.6},
+                'aod550': {'min': 0.05, 'max': 1.0},
+                'h2o': {'min': 0.5, 'max': 5.0},
+                'o3': {'min': 0.2, 'max': 0.4},
+            }
 
         # 波段信息
         self.bands = self.config.BANDS
@@ -62,16 +73,6 @@ class MonteCarloDataGenerator:
 
         return scattering_angle
 
-    def calculate_airmass(self, zenith_angle: float) -> float:
-        """
-        计算大气质量因子
-        公式: airmass = 1/cos(θ) (简单近似)
-        """
-        cos_z = np.cos(np.radians(zenith_angle))
-        # 防止除零
-        cos_z = np.clip(cos_z, 0.001, 1.0)
-        return 1.0 / cos_z
-
     def is_extreme_geometry(self, sza: float, vza: float) -> bool:
         """判断是否为极端几何条件"""
         return (sza > self.extreme_threshold) or (vza > self.extreme_threshold)
@@ -81,27 +82,13 @@ class MonteCarloDataGenerator:
         常规几何条件采样 - 均匀分布
         """
         params = {}
+        sza_range = self.param_ranges.get('sza', {'min': 0, 'max': 85})
+        vza_range = self.param_ranges.get('vza', {'min': 0, 'max': 85})  # 改为85
+        raa_range = self.param_ranges.get('raa', {'min': 0, 'max': 180})
 
-        # SZA: 整个范围内均匀采样
-        params['sza'] = np.random.uniform(
-            self.param_ranges['sza']['min'],
-            self.param_ranges['sza']['max'],
-            n_samples
-        )
-
-        # VZA: 整个范围内均匀采样
-        params['vza'] = np.random.uniform(
-            self.param_ranges['vza']['min'],
-            self.param_ranges['vza']['max'],
-            n_samples
-        )
-
-        # RAA: 0-180°均匀采样
-        params['raa'] = np.random.uniform(
-            self.param_ranges['raa']['min'],
-            self.param_ranges['raa']['max'],
-            n_samples
-        )
+        params['sza'] = np.random.uniform(sza_range['min'], sza_range['max'], n_samples)
+        params['vza'] = np.random.uniform(vza_range['min'], vza_range['max'], n_samples)
+        params['raa'] = np.random.uniform(raa_range['min'], raa_range['max'], n_samples)
 
         return params
 
@@ -109,38 +96,60 @@ class MonteCarloDataGenerator:
         """
         极端几何条件过采样
         专门采样 SZA > 60° 或 VZA > 60° 的情况
+        增强采样：极端角度内部分布更偏向大角度
         """
         params = {'sza': [], 'vza': [], 'raa': []}
 
-        samples_generated = 0
-        max_attempts = n_samples * 10  # 防止无限循环
+        sza_range = self.param_ranges.get('sza', {'min': 0, 'max': 85})
+        vza_range = self.param_ranges.get('vza', {'min': 0, 'max': 85})
+        raa_range = self.param_ranges.get('raa', {'min': 0, 'max': 180})
 
+        # 定义极端角度子范围
+        extreme_sza_min = 60
+        extreme_vza_min = 60
+
+        samples_generated = 0
+        max_attempts = n_samples * 20  # 增加尝试次数
+
+        # 使用更偏向大角度的分布
         for _ in range(max_attempts):
             if samples_generated >= n_samples:
                 break
 
-            # 生成随机角度
-            sza = np.random.uniform(
-                self.param_ranges['sza']['min'],
-                self.param_ranges['sza']['max']
-            )
-            vza = np.random.uniform(
-                self.param_ranges['vza']['min'],
-                self.param_ranges['vza']['max']
-            )
-            raa = np.random.uniform(
-                self.param_ranges['raa']['min'],
-                self.param_ranges['raa']['max']
-            )
+            # 在极端范围内使用偏向大角度的分布（平方分布）
+            sza_random = np.random.uniform(0, 1)
+            # 平方分布使得更多样本靠近85°
+            sza = extreme_sza_min + (sza_range['max'] - extreme_sza_min) * (sza_random ** 0.5)
 
-            # 检查是否为极端角度
+            vza_random = np.random.uniform(0, 1)
+            vza = extreme_vza_min + (vza_range['max'] - extreme_vza_min) * (vza_random ** 0.5)
+
+            raa = np.random.uniform(raa_range['min'], raa_range['max'])
+
+            # 确保至少一个是极端角度
             if self.is_extreme_geometry(sza, vza):
                 params['sza'].append(sza)
                 params['vza'].append(vza)
                 params['raa'].append(raa)
                 samples_generated += 1
 
-        # 转换为numpy数组
+        # 如果没采够，用常规方式补充
+        if samples_generated < n_samples:
+            remaining = n_samples - samples_generated
+            for _ in range(remaining * 5):
+                if samples_generated >= n_samples:
+                    break
+
+                sza = np.random.uniform(extreme_sza_min, sza_range['max'])
+                vza = np.random.uniform(extreme_vza_min, vza_range['max'])
+                raa = np.random.uniform(raa_range['min'], raa_range['max'])
+
+                if self.is_extreme_geometry(sza, vza):
+                    params['sza'].append(sza)
+                    params['vza'].append(vza)
+                    params['raa'].append(raa)
+                    samples_generated += 1
+
         for key in params:
             params[key] = np.array(params[key][:n_samples])
 
@@ -152,31 +161,25 @@ class MonteCarloDataGenerator:
         """
         params = {}
 
-        # 地表反射率: 连续均匀分布
-        params['rho_true'] = np.random.uniform(
-            self.param_ranges['rho_true']['min'],
-            self.param_ranges['rho_true']['max'],
-            n_samples
-        )
+        # 获取范围
+        rho_range = self.param_ranges.get('rho_true', {'min': 0.01, 'max': 0.6})
+        aod_range = self.param_ranges.get('aod550', {'min': 0.05, 'max': 1.0})
+        h2o_range = self.param_ranges.get('h2o', {'min': 0.5, 'max': 5.0})
+        o3_range = self.param_ranges.get('o3', {'min': 0.2, 'max': 0.4})
 
-        # 气溶胶光学厚度: 对数均匀分布（更符合实际情况）
-        aod_log_min = np.log10(self.param_ranges['aod550']['min'])
-        aod_log_max = np.log10(self.param_ranges['aod550']['max'])
+        # 地表反射率: 连续均匀分布
+        params['rho_true'] = np.random.uniform(rho_range['min'], rho_range['max'], n_samples)
+
+        # 气溶胶光学厚度: 对数均匀分布
+        aod_log_min = np.log10(aod_range['min'])
+        aod_log_max = np.log10(aod_range['max'])
         params['aod550'] = 10 ** np.random.uniform(aod_log_min, aod_log_max, n_samples)
 
         # 水汽: 均匀分布
-        params['h2o'] = np.random.uniform(
-            self.param_ranges['h2o']['min'],
-            self.param_ranges['h2o']['max'],
-            n_samples
-        )
+        params['h2o'] = np.random.uniform(h2o_range['min'], h2o_range['max'], n_samples)
 
         # 臭氧: 均匀分布
-        params['o3'] = np.random.uniform(
-            self.param_ranges['o3']['min'],
-            self.param_ranges['o3']['max'],
-            n_samples
-        )
+        params['o3'] = np.random.uniform(o3_range['min'], o3_range['max'], n_samples)
 
         return params
 
@@ -248,48 +251,53 @@ class MonteCarloDataGenerator:
                 band_combinations.append(params)
 
             all_combinations[band_id] = band_combinations
-            self.logger.info(f"  波段 {band_id}: 生成 {len(band_combinations)} 个参数组合")
-
-            # 统计极端角度比例
-            extreme_count = sum(1 for p in band_combinations if p['is_extreme'])
-            self.logger.info(f"  极端角度比例: {extreme_count / len(band_combinations) * 100:.1f}%")
 
         return all_combinations
 
     def generate_validation_grid(self, bands: List[str] = None) -> Dict[str, List[Dict]]:
         """
         生成稀疏规则网格用于验证（不参与训练）
-        保持原有网格特性以便可视化对比
+        读取 config.py 中的 VALIDATION_GRID 配置
         """
         if bands is None:
             bands = list(self.bands.keys())
 
-        # 稀疏网格配置
-        grid_config = {
-            'sza': [0, 20, 40, 60, 70, 75, 80, 85],
-            'vza': [0, 20, 40, 60, 70, 75],
-            'raa': [0, 30, 60, 90, 120, 150, 180],
-            'rho_true': [0.05, 0.1, 0.2, 0.3, 0.4, 0.5],
-            'aod550': [0.05, 0.1, 0.2, 0.3, 0.5, 1.0],
-            'h2o': [0.5, 1.0, 2.0, 3.0, 4.0, 5.0],
-            'o3': [0.2, 0.25, 0.3, 0.35, 0.4],
-        }
+        # 直接读取 Config 中的配置
+        if hasattr(self.config, 'VALIDATION_GRID'):
+            grid_config = self.config.VALIDATION_GRID
+            self.logger.info("成功读取 Config.VALIDATION_GRID 配置")
+        else:
+            self.logger.warning("未找到 VALIDATION_GRID 配置，使用内置默认值")
+            grid_config = {
+                'sza': [0, 20, 40, 60, 70, 75, 80],
+                'vza': [0, 20, 40, 60, 70],
+                'raa': [0, 90, 180],
+                'rho_true': [0.1, 0.3, 0.5],
+                'aod550': [0.1, 0.3, 0.5, 0.8],
+                'h2o': [2.0],
+                'o3': [0.3],
+            }
 
         all_combinations = {}
+        total_count_all_bands = 0
 
         for band_id in bands:
             wavelength = self.bands[band_id]['wavelength']
             combinations = []
 
+            # 获取各个维度的列表
+            sza_list = grid_config.get('sza', [0])
+            vza_list = grid_config.get('vza', [0])
+            raa_list = grid_config.get('raa', [0])
+            rho_list = grid_config.get('rho_true', [0.2])
+            aod_list = grid_config.get('aod550', [0.1])
+            h2o_list = grid_config.get('h2o', [2.0])
+            o3_list = grid_config.get('o3', [0.3])
+
             # 使用itertools生成所有组合
             for values in product(
-                    grid_config['sza'],
-                    grid_config['vza'],
-                    grid_config['raa'],
-                    grid_config['rho_true'],
-                    grid_config['aod550'],
-                    grid_config['h2o'],
-                    grid_config['o3']
+                    sza_list, vza_list, raa_list,
+                    rho_list, aod_list, h2o_list, o3_list
             ):
                 sza, vza, raa, rho_true, aod550, h2o, o3 = values
 
@@ -312,6 +320,8 @@ class MonteCarloDataGenerator:
                 combinations.append(params)
 
             all_combinations[band_id] = combinations
+            total_count_all_bands += len(combinations)
             self.logger.info(f"验证网格 - 波段 {band_id}: {len(combinations)} 个组合")
 
+        self.logger.info(f"验证网格生成完毕，总计: {total_count_all_bands} 个样本")
         return all_combinations

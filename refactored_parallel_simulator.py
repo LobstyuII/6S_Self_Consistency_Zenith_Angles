@@ -242,12 +242,16 @@ class RefactoredParallelSimulator:
         self.logger = logger or setup_logger('RefactoredParallelSimulator')
         self.data_generator = MonteCarloDataGenerator(config, logger)
 
-    def generate_training_dataset(self, total_samples_per_band: int = 50000,
+    def generate_training_dataset(self, total_samples_per_band: int = 100000,
                                   bands: List[str] = None) -> Dict[str, List[Dict]]:
         """
         生成训练数据集 - 蒙特卡洛混合采样
         """
         self.logger.info(f"生成训练数据集，每波段 {total_samples_per_band:,} 个样本")
+        self.logger.info(f"角度范围: SZA 0-85°, VZA 0-85°")
+        self.logger.info(f"极端角度阈值: {self.config.MONTE_CARLO_CONFIG['extreme_threshold']}°")
+        self.logger.info(f"采样比例: 常规 {self.config.MONTE_CARLO_CONFIG['regular_ratio']*100:.0f}%, "
+                        f"极端 {self.config.MONTE_CARLO_CONFIG['extreme_ratio']*100:.0f}%")
 
         # 生成混合采样数据集
         training_data = self.data_generator.generate_mixed_sampling_dataset(

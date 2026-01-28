@@ -15,7 +15,7 @@ from datetime import datetime
 
 # 机器学习库
 from sklearn.model_selection import GridSearchCV, RandomizedSearchCV, KFold
-from sklearn.ensemble import RandomForestRegressor, GradientBoostingRegressor
+from sklearn.ensemble import RandomForestRegressor, GradientBoostingRegressor, ExtraTreesRegressor
 from sklearn.svm import SVR
 from sklearn.neural_network import MLPRegressor
 from sklearn.linear_model import Ridge, Lasso, ElasticNet
@@ -152,6 +152,22 @@ class ModelTrainer:
                 'n_iter': 8,
                 'description': '梯度提升回归树(优化版)'
             },
+            'ExtraTrees': {
+                'model_class': ExtraTreesRegressor,
+                'params': {
+                    'n_estimators': [50, 100],
+                    'max_depth': [10, 15, 20],
+                    'min_samples_split': [10, 20, 50],
+                    'min_samples_leaf': [5, 10, 20],
+                    'max_features': ['sqrt', 0.5],
+                    'bootstrap': [True],
+                    'random_state': [self.config.RANDOM_SEED],
+                    'n_jobs': [1]
+                },
+                'search_method': 'randomized',
+                'n_iter': 8,
+                'description': '极端随机树回归'
+            },
             'SVR_RBF': {
                 'model_class': SVR,
                 'params': {
@@ -246,7 +262,7 @@ class ModelTrainer:
             y_train_sampled = y_train
 
         # 调整并行度避免内存爆炸
-        if model_name in ['RandomForest']:
+        if model_name in ['RandomForest', 'ExtraTrees']:
             if 'n_jobs' in params:
                 params['n_jobs'] = [1]  # 强制单线程
             current_n_jobs = 1
@@ -274,7 +290,7 @@ class ModelTrainer:
                 n_iter=n_iter,
                 cv=cv,
                 scoring='neg_mean_squared_error',
-                n_jobs=1 if model_name in ['RandomForest'] else self.n_jobs,
+                n_jobs=1 if model_name in ['RandomForest', 'ExtraTrees'] else self.n_jobs,
                 random_state=self.config.RANDOM_SEED,
                 verbose=0
             )
@@ -284,7 +300,7 @@ class ModelTrainer:
                 param_grid=params,
                 cv=cv,
                 scoring='neg_mean_squared_error',
-                n_jobs=1 if model_name in ['RandomForest'] else self.n_jobs,
+                n_jobs=1 if model_name in ['RandomForest', 'ExtraTrees'] else self.n_jobs,
                 verbose=0
             )
 
@@ -472,7 +488,7 @@ def train_main():
     parser = argparse.ArgumentParser(description='机器学习模型训练系统')
     parser.add_argument('--sample', type=float, default=0.5,
                         help='数据采样比例 (0.01-1.0)')
-    parser.add_argument('--models', type=str, default='RandomForest,XGBoost,LightGBM,GradientBoosting',
+    parser.add_argument('--models', type=str, default='RandomForest,XGBoost,LightGBM,GradientBoosting,ExtraTrees',
                         help='要训练的模型列表，用逗号分隔')
     parser.add_argument('--test_size', type=float, default=0.2,
                         help='测试集比例')
