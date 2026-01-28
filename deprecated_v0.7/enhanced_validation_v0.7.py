@@ -111,7 +111,7 @@ class EnhancedValidatorV0_7:
             if not loaded:
                 # 尝试在常见位置搜索
                 search_dirs = [
-                    Path("."),
+                    Path(".."),
                     Path("./models"),
                     Path("D:/6S_Self_Consistency_Zenith_Angles_v0.4/models"),
                     Path("D:/6S_Self_Consistency_Zenith_Angles_v0.4/models/refactored")
@@ -268,13 +268,13 @@ class EnhancedValidatorV0_7:
         if not lsr_path.exists():
             print(f"Error: LSR data file not found: {lsr_data_path}")
             # 尝试在缓存目录查找
-            cache_path = Path("./lsr_cache") / lsr_path.name
+            cache_path = Path("lsr_cache") / lsr_path.name
             if cache_path.exists():
                 print(f"Found in cache directory: {cache_path}")
                 lsr_path = cache_path
             else:
                 # 查找任何包含日期的文件
-                possible_files = list(Path(".").glob("*lsr*.parquet"))
+                possible_files = list(Path("..").glob("*lsr*.parquet"))
                 if possible_files:
                     lsr_path = possible_files[0]
                     print(f"Found alternative file: {lsr_path}")
@@ -1239,7 +1239,7 @@ class EnhancedValidatorV0_7:
                 stats_path_candidates.append(file)
 
         # 方法4: 在缓存目录查找
-        cache_dir = Path("./lsr_cache")
+        cache_dir = Path("lsr_cache")
         if cache_dir.exists():
             # 查找与 LSR 文件同名的统计文件
             stats_path_candidates.append(cache_dir / f"{lsr_path.stem}_stats.json")

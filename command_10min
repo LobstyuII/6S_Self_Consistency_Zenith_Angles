@@ -1,0 +1,32 @@
+1. 执行顺序
+第一步：下载10分钟数据
+
+python Downloader_Himawari_10min.py
+选择L1和L2数据，日期范围输入：20200501-20200507
+
+第二步：插值MERRA2辅助数据
+
+python MERRA2_10min_Interpolator.py
+第三步：运行6S反演
+
+python ahi_6s_inversion_10min.py --start_date 20200501 --end_date 20200507 --all_bands
+第四步：生成验证图片
+
+bash
+python enhanced_validation_10min.py --lsr_data ./lsr_cache_10min/lsr_cache_10min_20200501_20200507_*.parquet --output_dir ./validation_results_10min
+
+
+
+python convert_old_lsr_to_band_files.py --input "D:\Users\lobst\PycharmProjects\6S_Self_Consistency_Zenith_Angles\lsr_cache_10min\lsr_cache_10min_20200501_20200507_d2a71af0.parquet" --output "D:/H8_data/LSR_10min/converted_bands"
+
+
+
+
+python enhanced_validation_10min_final.py --data_dir "./lsr_results_10min/" --bands 01 02 --model_path "D:/6S_Self_Consistency_Zenith_Angles_v0.4/models/refactored/XGBoost_model.pkl" --output_dir "./Validation_band12/"
+
+
+
+
+
+
+
