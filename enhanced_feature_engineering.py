@@ -168,6 +168,14 @@ class EnhancedFeatureEngineering:
             interaction_features = self.calculate_interaction_features(df, physical_features)
             features = pd.concat([features, interaction_features], axis=1)
 
+        # 新增：直接复制光程比特征（如果存在）
+        if 'airmass_ratio_sza' in df.columns:
+            features['airmass_ratio_sza'] = df['airmass_ratio_sza']
+        if 'airmass_ratio_vza' in df.columns:
+            features['airmass_ratio_vza'] = df['airmass_ratio_vza']
+        if 'airmass_ratio_sza' in df.columns and 'airmass_ratio_vza' in df.columns:
+            features['airmass_ratio_total'] = df['airmass_ratio_sza'] * df['airmass_ratio_vza']
+
         return features
 
     def get_feature_categories(self) -> Dict[str, List[str]]:

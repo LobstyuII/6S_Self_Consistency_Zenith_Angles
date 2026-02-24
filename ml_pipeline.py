@@ -1,15 +1,18 @@
 # ==================== ml_pipeline.py ====================
 """
 整合的机器学习流水线
-提供一站式训练和评估功能
+目标变量：delta_toa
 """
 import argparse
 from datetime import datetime
-import sys
+import pickle
+from pathlib import Path
 
 from config import ExperimentConfig
-from model_trainer import train_main
-from model_evaluator import evaluate_main
+from model_trainer import ModelTrainer
+from model_evaluator import ModelEvaluator
+from data_loader import DataLoader
+import numpy as np
 
 
 class MLPipeline:
@@ -28,7 +31,7 @@ class MLPipeline:
                           output_suffix: str = ""):
         """运行完整流水线（训练+评估）"""
         print("\n" + "=" * 80)
-        print("🚀 机器学习完整流水线")
+        print("🚀 机器学习完整流水线 (目标: ΔTOA)")
         print("=" * 80)
         print(f"开始时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
         print("=" * 80)
@@ -38,68 +41,78 @@ class MLPipeline:
             print("\n📌 第一步：训练模型")
             print("-" * 80)
 
-            # 设置训练参数
-            sys.argv = [
-                'model_trainer.py',
-                '--sample', str(sample_fraction),
-                '--models', models_to_train,
-                '--test_size', str(test_size),
-                '--cv_folds', str(cv_folds),
-                '--n_jobs', str(n_jobs),
-                '--output_suffix', output_suffix
-            ]
-
-            if not use_feature_engineering:
-                sys.argv.append('--no_feature_engineering')
-
-            # 运行训练
-            train_result = train_main()
-
-            if train_result != 0:
-                print("❌ 训练失败，终止流水线")
-                return train_result
-
-            # 获取最新创建的模型目录
-            models_dir = self.config.MODELS_DIR
-            model_dirs = sorted(models_dir.glob("model_training_*"))
-            if not model_dirs:
-                print("❌ 未找到模型目录")
-                return 1
-
-            latest_model_dir = model_dirs[-1]
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             if output_suffix:
-                latest_model_dir = models_dir / f"model_training_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{output_suffix}"
+                suffix = f"_{output_suffix}" if not output_suffix.startswith('_') else output_suffix
+                model_output_dir = self.config.MODELS_DIR / f"model_training_{timestamp}{suffix}"
+            else:
+                model_output_dir = self.config.MODELS_DIR / f"model_training_{timestamp}"
 
-            print(f"✅ 模型已保存至: {latest_model_dir}")
+            trainer = ModelTrainer(config=self.config, n_jobs=n_jobs, output_dir=model_output_dir)
+
+            dl = DataLoader(config=self.config)
+            data_dict = dl.load_and_prepare(
+                sample_fraction=sample_fraction,
+                test_size=test_size,
+                use_feature_engineering=use_feature_engineering
+            )
+
+            # 样本权重计算（与旧版相同）
+            X_raw = data_dict['X_raw']
+            extreme_threshold = self.config.MONTE_CARLO_CONFIG.get('extreme_threshold', 85.0)
+            if 'sza' in X_raw.columns and 'vza' in X_raw.columns:
+                is_extreme = (X_raw['sza'] > extreme_threshold) | (X_raw['vza'] > extreme_threshold)
+                sample_weight = np.where(is_extreme, 10.0, 1.0)
+                train_indices = data_dict['X_train'].index
+                sample_weight_train = sample_weight[train_indices]
+                print(f"   极端样本加权：极端样本数 {is_extreme.sum()}，常规样本数 {(~is_extreme).sum()}")
+            else:
+                sample_weight_train = None
+
+            if models_to_train.lower() == 'all':
+                model_list = list(trainer.model_configs.keys())
+            else:
+                model_list = [m.strip() for m in models_to_train.split(',')]
+
+            training_results = trainer.train_models(
+                data_dict['X_train'], data_dict['y_train'],
+                models_to_train=model_list,
+                cv_folds=cv_folds,
+                sample_weight=sample_weight_train
+            )
+
+            artifacts = {
+                'scaler': data_dict['scaler'],
+                'feature_names': data_dict['feature_names']
+            }
+            artifacts_path = trainer.output_dir / "training_artifacts.pkl"
+            with open(artifacts_path, 'wb') as f:
+                pickle.dump(artifacts, f)
+
+            print(f"✅ 模型已保存至: {trainer.output_dir}")
 
             # 第二步：评估模型
             print("\n📌 第二步：评估模型")
             print("-" * 80)
 
-            # 设置评估参数
-            sys.argv = [
-                'model_evaluator.py',
-                '--saved_dir', str(latest_model_dir),
-                '--sample', str(sample_fraction / 2),  # 使用更少的数据进行评估
-            ]
+            evaluator = ModelEvaluator(
+                saved_dir=trainer.output_dir,
+                config=self.config,
+                use_shap=use_shap
+            )
 
-            if not use_feature_engineering:
-                sys.argv.append('--no_feature_engineering')
-
-            if not use_shap:
-                sys.argv.append('--no_shap')
-
-            # 运行评估
-            eval_result = evaluate_main()
+            results_df = evaluator.evaluate_models(data_dict['X_test'], data_dict['y_test'])
+            evaluator.generate_all_visualizations(data_dict['X_test'], data_dict['y_test'], results_df)
+            evaluator.generate_report(results_df)
 
             print("\n" + "=" * 80)
             print("🎉 完整流水线执行完成!")
             print("=" * 80)
             print(f"完成时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-            print(f"模型目录: {latest_model_dir}")
+            print(f"模型目录: {trainer.output_dir}")
             print("=" * 80)
 
-            return eval_result
+            return 0
 
         except Exception as e:
             print(f"\n❌ 流水线执行失败: {e}")
@@ -116,27 +129,44 @@ class MLPipeline:
         print("🔍 评估已存在的模型")
         print("=" * 80)
 
-        # 设置评估参数
-        sys.argv = [
-            'model_evaluator.py',
-            '--saved_dir', saved_dir,
-            '--sample', str(sample_fraction),
-        ]
+        try:
+            evaluator = ModelEvaluator(
+                saved_dir=Path(saved_dir),
+                config=self.config,
+                use_shap=use_shap
+            )
 
-        if not use_feature_engineering:
-            sys.argv.append('--no_feature_engineering')
+            dl = DataLoader(config=self.config)
+            test_data = dl.load_data(sample_fraction=sample_fraction)
 
-        if not use_shap:
-            sys.argv.append('--no_shap')
+            X_test, y_test = evaluator.prepare_test_data(
+                test_data,
+                use_feature_engineering=use_feature_engineering
+            )
 
-        # 运行评估
-        return evaluate_main()
+            results_df = evaluator.evaluate_models(X_test, y_test)
+            evaluator.generate_all_visualizations(X_test, y_test, results_df)
+            evaluator.generate_report(results_df)
+
+            print("\n" + "=" * 80)
+            print("🎉 模型评估完成!")
+            print("=" * 80)
+            print(f"完成时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+            print(f"模型目录: {saved_dir}")
+            print("=" * 80)
+
+            return 0
+
+        except Exception as e:
+            print(f"\n❌ 评估失败: {e}")
+            import traceback
+            traceback.print_exc()
+            return 1
 
 
 def pipeline_main():
     """流水线主函数"""
-    parser = argparse.ArgumentParser(description='机器学习流水线系统')
-
+    parser = argparse.ArgumentParser(description='机器学习流水线系统 (目标: ΔTOA)')
     subparsers = parser.add_subparsers(dest='command', help='子命令')
 
     # 完整流水线命令
@@ -145,7 +175,7 @@ def pipeline_main():
                                  help='数据采样比例 (0.01-1.0)')
     pipeline_parser.add_argument('--models', type=str,
                                  default='RandomForest,XGBoost,LightGBM,GradientBoosting',
-                                 help='要训练的模型列表，用逗号分隔')
+                                 help='要训练的模型列表')
     pipeline_parser.add_argument('--test_size', type=float, default=0.2,
                                  help='测试集比例')
     pipeline_parser.add_argument('--cv_folds', type=int, default=5,
@@ -164,7 +194,7 @@ def pipeline_main():
     eval_parser.add_argument('--saved_dir', type=str, required=True,
                              help='已保存模型的目录路径')
     eval_parser.add_argument('--sample', type=float, default=0.3,
-                             help='测试数据采样比例 (0.01-1.0)')
+                             help='测试数据采样比例')
     eval_parser.add_argument('--no_feature_engineering', action='store_true',
                              help='禁用特征工程')
     eval_parser.add_argument('--no_shap', action='store_true',
@@ -173,10 +203,10 @@ def pipeline_main():
     # 单独训练命令
     train_parser = subparsers.add_parser('train', help='只训练模型')
     train_parser.add_argument('--sample', type=float, default=0.5,
-                              help='数据采样比例 (0.01-1.0)')
+                              help='数据采样比例')
     train_parser.add_argument('--models', type=str,
                               default='RandomForest,XGBoost,LightGBM,GradientBoosting',
-                              help='要训练的模型列表，用逗号分隔')
+                              help='要训练的模型列表')
     train_parser.add_argument('--test_size', type=float, default=0.2,
                               help='测试集比例')
     train_parser.add_argument('--cv_folds', type=int, default=5,
@@ -217,21 +247,43 @@ def pipeline_main():
         )
 
     elif args.command == 'train':
-        # 直接调用训练模块
-        sys.argv = [
-            'model_trainer.py',
-            '--sample', str(args.sample),
-            '--models', args.models,
-            '--test_size', str(args.test_size),
-            '--cv_folds', str(args.cv_folds),
-            '--n_jobs', str(args.n_jobs),
-            '--output_suffix', args.output_suffix
-        ]
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        if args.output_suffix:
+            suffix = f"_{args.output_suffix}" if not args.output_suffix.startswith('_') else args.output_suffix
+            output_dir = pipeline.config.MODELS_DIR / f"model_training_{timestamp}{suffix}"
+        else:
+            output_dir = pipeline.config.MODELS_DIR / f"model_training_{timestamp}"
 
-        if args.no_feature_engineering:
-            sys.argv.append('--no_feature_engineering')
+        trainer = ModelTrainer(config=pipeline.config, n_jobs=args.n_jobs, output_dir=output_dir)
 
-        return train_main()
+        dl = DataLoader(config=pipeline.config)
+        data_dict = dl.load_and_prepare(
+            sample_fraction=args.sample,
+            test_size=args.test_size,
+            use_feature_engineering=not args.no_feature_engineering
+        )
+
+        if args.models.lower() == 'all':
+            model_list = list(trainer.model_configs.keys())
+        else:
+            model_list = [m.strip() for m in args.models.split(',')]
+
+        trainer.train_models(
+            data_dict['X_train'], data_dict['y_train'],
+            models_to_train=model_list,
+            cv_folds=args.cv_folds
+        )
+
+        artifacts = {
+            'scaler': data_dict['scaler'],
+            'feature_names': data_dict['feature_names']
+        }
+        artifacts_path = output_dir / "training_artifacts.pkl"
+        with open(artifacts_path, 'wb') as f:
+            pickle.dump(artifacts, f)
+
+        print(f"\n✅ 训练完成，模型保存至: {output_dir}")
+        return 0
 
     return 0
 

@@ -152,7 +152,7 @@ class EnhancedValidator10min:
                     print(f"\n🔍 在常见目录搜索模型文件...")
 
                 search_dirs = [
-                    Path("."),
+                    Path("../.."),
                     Path("./models"),
                     Path("D:/6S_Self_Consistency_Zenith_Angles_v0.4/models"),
                     Path("D:/6S_Self_Consistency_Zenith_Angles_v0.4/models/refactored"),

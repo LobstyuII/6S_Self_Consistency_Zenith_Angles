@@ -19,6 +19,9 @@ python main_workflow.py --training_gen --bands "band1,band3,band4" --training_sa
 # 1.5 快速测试：小样本量生成（1万样本/波段）
 python main_workflow.py --training_gen --validation_grid --training_samples 10000 --n_workers 4
 
+
+python main_workflow.py --plot_monte_carlo
+
 # ==================== 2. 机器学习训练命令 ====================
 
 # 2.1 训练所有ML模型（使用所有波段数据）
@@ -91,7 +94,7 @@ python enhanced_validation_v0.7.py --lsr_data ./lsr_cache/lsr_cache_20160401_201
 
 
 
-python enhanced_validation_10min_final.py --data_dir "./lsr_results_10min/" --bands 01 02 --model_path “D:\6S_Self_Consistency_Zenith_Angles_v0.4\models\refactored\model_training_20260117_152723\models\XGBoost_model.pkl" --output_dir "./Validation_band12/"
+python enhanced_validation_10min_final.py --data_dir "./lsr_results_10min/" --bands 01 02 --model_path "D:\6S_Self_Consistency_Zenith_Angles_v0.4\models\refactored\model_training_20260204_205625_complete_workflow\models\XGBoost_model.pkl" --output_dir "./Validation_band12/"
 
 
 

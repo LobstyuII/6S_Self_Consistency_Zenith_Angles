@@ -538,7 +538,7 @@ def convert_specific_file():
     如果你不想使用命令行，可以直接修改这里的路径
     """
     # 旧LSR文件路径
-    old_lsr_file = "D:\\Users\\lobst\\PycharmProjects\\6S_Self_Consistency_Zenith_Angles\\lsr_cache_10min\\lsr_cache_10min_20200501_20200507_d2a71af0.parquet"
+    old_lsr_file = "/lsr_cache_10min/lsr_cache_10min_20200501_20200507_d2a71af0.parquet"
 
     # 输出目录
     output_dir = "D:/H8_data/LSR_10min/converted_bands"

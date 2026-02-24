@@ -1,24 +1,31 @@
 # ==================== visualization_suite.py ====================
 """
-可视化套件 - 集成原有所有的绘图逻辑
-适配新的验证网格数据结构
+可视化套件（新框架）
+目标变量：delta_toa = ρ_TOA^SA - ρ_TOA^PPA
+"""
+import numpy as np# ==================== visualization_suite.py ====================
+"""
+可视化套件（新框架）
+目标变量：delta_toa = ρ_TOA^SA - ρ_TOA^PPA
 """
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
-from typing import Dict, List, Optional, Tuple
+from typing import List, Optional
 from pathlib import Path
 import xarray as xr
 import warnings
-from matplotlib.colors import LinearSegmentedColormap, Normalize
+from matplotlib.colors import Normalize, ListedColormap, TwoSlopeNorm
 from matplotlib.cm import ScalarMappable
+import argparse
+import matplotlib.lines as mlines
 
 warnings.filterwarnings('ignore')
 
 from config import ExperimentConfig
 from utils import setup_logger
 
-# 设置专业科研字体（RSE期刊风格）
+# 设置专业科研字体
 plt.rcParams.update({
     'font.family': 'sans-serif',
     'font.sans-serif': ['Arial', 'Helvetica', 'DejaVu Sans'],
@@ -38,35 +45,52 @@ plt.rcParams.update({
 
 class VisualizationSuite:
     """
-    集成可视化工具
-    包含：
-    1. 物理过程失真图 (LSR -> TOA -> Retrieved)
-    2. 误差分布等高线图 (Contour Plots)
+    可视化套件 - 使用验证网格数据绘制 ΔTOA 相关图形
     """
 
-    def __init__(self, data_dir: Optional[Path] = None, logger=None):
+    def __init__(self, data_dir: Optional[Path] = None,
+                 suffix: str = "",
+                 logger=None,
+                 fixed_rho_true: float = 0.3,
+                 fixed_raa: float = 0.0):
         self.logger = logger or setup_logger('VisualizationSuite')
-        self.data_dir = data_dir or ExperimentConfig.DATA_DIR
+        self.suffix = suffix
+        self.fixed_rho_true = fixed_rho_true
+        self.fixed_raa = fixed_raa
 
-        # 输出目录
-        self.output_dir = ExperimentConfig.MANU_FIGURES_DIR
+        if not (0 < self.fixed_rho_true <= 1.0):
+            self.logger.warning(f"fixed_rho_true={self.fixed_rho_true} 超出合理范围，重置为0.3")
+            self.fixed_rho_true = 0.3
+
+        self.logger.info(f"使用固定参数: rho_true={self.fixed_rho_true}, raa={self.fixed_raa}")
+
+        if data_dir:
+            self.data_dir = Path(data_dir)
+        else:
+            self.data_dir = ExperimentConfig.DATA_DIR
+
+        self.logger.info(f"使用数据目录: {self.data_dir}")
+
+        if not self.data_dir.exists():
+            self.logger.warning(f"数据目录不存在: {self.data_dir}")
+
+        output_subdir = f"visualization{self.suffix}"
+        self.output_dir = ExperimentConfig.MANU_FIGURES_DIR / output_subdir
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
-        # 加载数据
-        self.all_data = self._load_validation_grid_data()
+        self.validation_data = None
 
-        # 定义标准大气条件 (适配 config.py 中的生成值: 0.05, 0.2, 0.5)
-        # H2O 和 O3 固定为 config 中的单一值
+        # 标准大气条件
         self.atmospheric_conditions = {
             'clean': {
-                'name': 'Clean (AOD=0.05)',
-                'aod550': 0.05,
+                'name': 'Clean (AOD=0.1)',
+                'aod550': 0.1,
                 'h2o': 2.0,
                 'o3': 0.3
             },
             'average': {
-                'name': 'Average (AOD=0.2)',
-                'aod550': 0.2,  # 对应 Config 中的 0.2
+                'name': 'Average (AOD=0.3)',
+                'aod550': 0.3,
                 'h2o': 2.0,
                 'o3': 0.3
             },
@@ -78,100 +102,218 @@ class VisualizationSuite:
             }
         }
 
+        self.logger.info(f"初始化 VisualizationSuite:")
+        self.logger.info(f"  文件后缀: {self.suffix}")
+        self.logger.info(f"  输出目录: {self.output_dir}")
+
+    def _get_validation_filename(self, band_id: str) -> str:
+        return f"validation_grid_{band_id}{self.suffix}.nc"
+
     def _load_validation_grid_data(self) -> pd.DataFrame:
-        """加载验证网格数据 (validation_grid_*.nc)"""
+        """加载验证网格数据，重点关注 delta_toa 列，并将值截断至 [-2, 2] 范围内"""
+        if self.validation_data is not None:
+            return self.validation_data
+
         all_dfs = []
         self.logger.info("正在加载验证网格数据用于绘图...")
+        self.logger.info(f"查找文件模式: validation_grid_*{self.suffix}.nc")
+        self.logger.info(f"数据目录: {self.data_dir}")
+
+        if not self.data_dir.exists():
+            self.logger.error(f"数据目录不存在: {self.data_dir}")
+            return pd.DataFrame()
 
         for band_id in ExperimentConfig.BANDS.keys():
-            # 修改：读取 validation_grid 文件
-            data_file = self.data_dir / f"validation_grid_{band_id}.nc"
+            filename = self._get_validation_filename(band_id)
+            data_file = self.data_dir / filename
 
             if data_file.exists():
                 try:
+                    self.logger.info(f"加载文件: {data_file}")
                     ds = xr.open_dataset(data_file)
                     df = ds.to_dataframe().reset_index()
                     ds.close()
 
-                    # 确保必要的列存在
                     df['band'] = band_id
                     if 'wavelength' not in df.columns:
                         df['wavelength'] = ExperimentConfig.BANDS[band_id]['wavelength']
 
-                    # 确保必要的计算列
-                    if 'error_absolute' in df.columns and 'rho_true' in df.columns:
-                        df['error_relative'] = df['error_absolute'] / df['rho_true']
+                    # 确保 delta_toa 列存在
+                    if 'delta_toa' not in df.columns:
+                        # 如果存在 rho_toa_sa 和 rho_toa_ppa，则计算
+                        if 'rho_toa_sa' in df.columns and 'rho_toa_ppa' in df.columns:
+                            df['delta_toa'] = df['rho_toa_sa'] - df['rho_toa_ppa']
+                            self.logger.info(f"波段 {band_id}: 从 rho_toa_sa/ppa 计算 delta_toa")
+                        else:
+                            self.logger.error(f"波段 {band_id} 缺少 delta_toa 且无法计算，跳过")
+                            continue
 
-                    # 确保 rho_retrieved 存在 (如果是从 NC 加载可能需要重新计算或确保已保存)
-                    if 'rho_retrieved' not in df.columns and 'rho_toa' in df.columns:
-                        # 这是一个 fallback，理想情况下应该在 simulate 阶段保存
-                        # 如果没有反演值，这里暂时用 rho_toa 代替以防报错，但在日志中警告
-                        self.logger.warning(f"波段 {band_id} 缺少 rho_retrieved，绘图可能不准确")
-                        df['rho_retrieved'] = df.get('rho_true', 0) + df.get('error_absolute', 0)
+                    # 验证数据合理性
+                    self._validate_data_physics(df, band_id)
+
+                    # 将 ΔTOA 截断至 [-2, 2] 范围内（超出部分设为边界值）
+                    n_before = len(df)
+                    df['delta_toa'] = np.clip(df['delta_toa'], -2.0, 2.0)
+                    n_after = len(df)
+                    if n_before > n_after:
+                        self.logger.warning(f"波段 {band_id}: 截断了 {n_before - n_after} 个超出 [-2,2] 的 ΔTOA 值")
+
+                    self.logger.info(f"  波段 {band_id}: {len(df)} 条记录, "
+                                     f"ΔTOA 均值: {df['delta_toa'].mean():.6f}, "
+                                     f"范围: [{df['delta_toa'].min():.6f}, {df['delta_toa'].max():.6f}]")
 
                     all_dfs.append(df)
-                    self.logger.info(f"  已加载 {band_id}: {len(df)} 条记录")
 
                 except Exception as e:
                     self.logger.error(f"加载波段 {band_id} 失败: {e}")
+                    import traceback
+                    traceback.print_exc()
             else:
-                self.logger.warning(f"未找到文件: {data_file}，跳过该波段")
+                self.logger.warning(f"未找到文件: {data_file}")
 
         if all_dfs:
-            return pd.concat(all_dfs, ignore_index=True)
+            self.validation_data = pd.concat(all_dfs, ignore_index=True)
+            self.logger.info(f"验证数据总计: {len(self.validation_data)} 条记录")
+            self.logger.info(f"全局 ΔTOA 统计: 均值={self.validation_data['delta_toa'].mean():.6f}, "
+                             f"标准差={self.validation_data['delta_toa'].std():.6f}")
         else:
             self.logger.error("没有加载到任何验证数据！")
-            return pd.DataFrame()
+            self.validation_data = pd.DataFrame()
+
+        return self.validation_data
+
+    def _validate_data_physics(self, df: pd.DataFrame, band_id: str):
+        """验证数据的物理合理性（略作修改）"""
+        # 检查反射率范围
+        for col in ['rho_true', 'rho_toa_sa', 'rho_toa_ppa']:
+            if col in df.columns:
+                min_val = df[col].min()
+                max_val = df[col].max()
+                if min_val < 0 or max_val > 1:
+                    self.logger.warning(
+                        f"  波段 {band_id} 列 {col}: 值范围 [{min_val:.4f}, {max_val:.4f}] 超出合理范围 [0, 1]")
+
+        # 检查角度范围
+        for col in ['sza', 'vza']:
+            if col in df.columns:
+                min_val = df[col].min()
+                max_val = df[col].max()
+                if min_val < 0 or max_val > 90:
+                    self.logger.warning(
+                        f"  波段 {band_id} 列 {col}: 值范围 [{min_val:.1f}, {max_val:.1f}] 超出合理范围 [0, 90]")
+
+        if 'raa' in df.columns:
+            min_val = df['raa'].min()
+            max_val = df['raa'].max()
+            if min_val < 0 or max_val > 180:
+                self.logger.warning(
+                    f"  波段 {band_id} 列 raa: 值范围 [{min_val:.1f}, {max_val:.1f}] 超出合理范围 [0, 180]")
 
     def run_all_plots(self):
         """运行所有绘图任务"""
-        if self.all_data.empty:
-            self.logger.error("数据为空，无法绘图")
+        if self._load_validation_grid_data().empty:
+            self.logger.error("验证数据为空，无法绘图")
             return
 
-        self.logger.info(">>> 开始生成物理过程失真图 (Plot 1)...")
+        self.logger.info(">>> 开始生成物理过程失真图 (Plot 1 - Validation Grid)...")
         self.plot_distortion_process()
 
-        self.logger.info(">>> 开始生成误差分布 Contour 图 (Plot 2)...")
-        self.plot_error_contours(error_type='absolute')
-        self.plot_error_contours(error_type='relative')
+        self.logger.info(">>> 开始生成 ΔTOA 分布 Contour 图 (Plot 2 - Validation Grid)...")
+        self.plot_delta_toa_contours()
 
     # =========================================================================
-    # Part 1: Weird Line Plots (Distortion Process)
+    # Part 1: Weird Line Plots (Distortion Process) - 与旧版类似，但三点的含义需调整
     # =========================================================================
     def plot_distortion_process(self):
-        """生成 LSR -> TOA -> LSR' 过程图"""
-        # 1. 固定 SZA，变化 VZA (使用 Band 3)
-        band_data = self.all_data[self.all_data['band'] == 'band3'].copy()
-        if band_data.empty:
-            self.logger.warning("Band 3 数据缺失，跳过 Plot 1")
+        """
+        生成过程图：显示 ρ_true, ρ_TOA^SA, ρ_TOA^PPA 的对比
+        针对每个 RAA 值分别生成固定SZA和固定VZA图
+        """
+        data = self._load_validation_grid_data()
+        if data.empty:
+            self.logger.warning("数据缺失，跳过 Plot 1")
             return
 
-        # Config 中 SZA 有 [0, 20, 40, 60, 70, 75, 80, 85]
-        # 我们选取几个典型的用于展示
-        fixed_sza_values = [0, 40, 60, 75]
-        self._create_fixed_sza_figure(band_data, fixed_sza_values)
+        raa_values = ExperimentConfig.VALIDATION_GRID['raa']
+        self.logger.info(f"将为以下 RAA 值生成过程图: {raa_values}")
 
-        # 2. 固定 VZA，变化 SZA
-        # Config 中 VZA 有 [0, 20, 40, 60, 70, 75]
-        fixed_vza_values = [0, 20, 40, 60]
-        self._create_fixed_vza_figure(band_data, fixed_vza_values)
+        fixed_sza_values = [0, 30, 60, 85, 89]
+        fixed_vza_values = [0, 30, 60, 85, 89]
 
-    def _create_fixed_sza_figure(self, data: pd.DataFrame, fixed_sza_values: List):
+        for raa in raa_values:
+            self.logger.info(f"正在生成 RAA = {raa}° 的过程图...")
+            param_text = f" (ρ={self.fixed_rho_true}, RAA={raa}°)"
+
+            # 固定 SZA 子图
+            self._create_fixed_sza_figure(
+                data, fixed_sza_values, param_text, raa_value=raa
+            )
+            # 固定 VZA 子图
+            self._create_fixed_vza_figure(
+                data, fixed_vza_values, param_text, raa_value=raa
+            )
+
+    # ---------- 自定义两段式尺度变换 (新版) ----------
+    @staticmethod
+    def _forward_segmented_v2(y):
+        """将数据坐标 y 映射到轴坐标 [0,1]：两段式 [0,1]占1/3, [1,20]占2/3"""
+        y = np.asarray(y)
+        b1, b2 = 0.0, 1.0
+        b3 = 20.0
+        len1 = b2 - b1
+        len2 = b3 - b2
+        frac1, frac2 = 1/3, 2/3
+        pos = np.zeros_like(y, dtype=float)
+        mask1 = y <= b2
+        pos[mask1] = (y[mask1] - b1) / len1 * frac1
+        mask2 = y > b2
+        pos[mask2] = frac1 + (y[mask2] - b2) / len2 * frac2
+        pos = np.clip(pos, 0, 1)
+        return pos
+
+    @staticmethod
+    def _inverse_segmented_v2(pos):
+        """将轴坐标 [0,1] 映射回数据坐标 y"""
+        pos = np.asarray(pos)
+        b1, b2 = 0.0, 1.0
+        b3 = 20.0
+        len1 = b2 - b1
+        len2 = b3 - b2
+        frac1, frac2 = 1/3, 2/3
+        y = np.zeros_like(pos, dtype=float)
+        mask1 = pos <= frac1
+        y[mask1] = b1 + (pos[mask1] / frac1) * len1
+        mask2 = pos > frac1
+        y[mask2] = b2 + ((pos[mask2] - frac1) / frac2) * len2
+        return y
+
+    # ---------- 固定 SZA 图 ----------
+    def _create_fixed_sza_figure(self, data: pd.DataFrame, fixed_sza_values: List,
+                                 param_text: str, raa_value: float):
+        """创建固定 SZA 图形（新布局：ρ_true 左，SA 与 PPA 右，虚线连接）"""
+        vza_levels = [0, 15, 30, 45, 60, 75, 80, 85, 86, 87, 88, 89]
+        n_vza = len(vza_levels)
+        base_cmap = plt.cm.viridis
+        vza_colors = [base_cmap(i / (n_vza - 1)) for i in range(n_vza)]
+        vza_cmap = ListedColormap(vza_colors)
+        vza_norm = Normalize(vmin=0, vmax=n_vza - 1)
+
         atm_order = ['clean', 'average', 'polluted']
-        fig, axes = plt.subplots(3, 4, figsize=(12, 9), gridspec_kw={'hspace': 0.3, 'wspace': 0.25})
+        fig, axes = plt.subplots(3, 5, figsize=(18, 10),
+                                 gridspec_kw={'hspace': 0.35, 'wspace': 0.25})
+        if axes.ndim == 1:
+            axes = axes.reshape(3, 5)
 
-        # VZA 颜色映射
-        colors_vza = [(0.9, 0.95, 1.0), (0.4, 0.6, 1.0), (0.1, 0.2, 0.8), (0.5, 0.1, 0.6)]
-        cmap_vza = LinearSegmentedColormap.from_list('wide_gradient_vza', colors_vza, N=256)
-        vza_min, vza_max = 0, 75
+        # 新坐标定义
+        x_true, x_sa, x_ppa = 0.0, 1.0, 1.3
 
         for row_idx, condition_key in enumerate(atm_order):
             cond_params = self.atmospheric_conditions[condition_key]
-            # 宽松过滤数据
             cond_data = data[
                 (np.abs(data['aod550'] - cond_params['aod550']) < 0.05) &
-                (np.abs(data['h2o'] - cond_params['h2o']) < 0.5)
+                (np.abs(data['h2o'] - cond_params['h2o']) < 0.5) &
+                (np.abs(data['rho_true'] - self.fixed_rho_true) < 0.001) &
+                (np.abs(data['raa'] - raa_value) < 0.1)
                 ]
 
             for col_idx, sza_val in enumerate(fixed_sza_values):
@@ -182,61 +324,153 @@ class VisualizationSuite:
                     ax.axis('off')
                     continue
 
-                vza_in_data = np.sort(sza_data['vza'].unique())
+                # 根据 sza_val 是否为极端角度设置 y 轴范围和尺度
+                if sza_val >= 85:
+                    # 极端角度：使用新版两段式尺度，范围 0-20
+                    ax.set_yscale('function', functions=(self._forward_segmented_v2, self._inverse_segmented_v2))
+                    ax.set_ylim(0, 20)
+                    # 主刻度
+                    ax.set_yticks([0.0, 1.0, 20.0])
+                    ax.set_yticklabels(['0.0', '1.0', '20.0'])
+                    # 次刻度
+                    ax.set_yticks([5.0, 10.0, 15.0], minor=True)
+                    ax.set_yticklabels(['5', '10', '15'], minor=True)
+                    # 添加分界线
+                    ax.axhline(y=1, color='gray', linestyle=':', linewidth=0.8, alpha=0.7)
+                else:
+                    # 非极端角度：线性 [0,1]
+                    ax.set_ylim(0, 1)
+                    ax.set_yticks(np.linspace(0, 1, 6))
+                    ax.set_yticklabels([f'{y:.1f}' for y in np.linspace(0, 1, 6)], fontsize=8)
+                    ax.axhline(y=0, color='gray', linestyle=':', linewidth=0.8, alpha=0.7)
+                    ax.axhline(y=1, color='gray', linestyle=':', linewidth=0.8, alpha=0.7)
 
-                for vza_val in vza_in_data:
+                # 绘制各个 VZA 的数据点及连线
+                for vza_val in vza_levels:
                     point_data = sza_data[np.abs(sza_data['vza'] - vza_val) < 2.0]
-                    if len(point_data) > 0:
-                        vals = [
-                            point_data['rho_true'].mean(),
-                            point_data['rho_toa'].mean(),
-                            point_data['rho_retrieved'].mean()
-                        ]
+                    if point_data.empty:
+                        continue
 
-                        color_norm = (vza_val - vza_min) / (vza_max - vza_min)
-                        color = cmap_vza(color_norm)
+                    vals = [
+                        point_data['rho_true'].mean(),
+                        point_data['rho_toa_sa'].mean(),
+                        point_data['rho_toa_ppa'].mean()
+                    ]
 
-                        ax.plot([0, 1, 2], vals, '-', linewidth=1.2, markersize=4, marker='o',
-                                color=color, alpha=0.8)
+                    idx = vza_levels.index(vza_val)
+                    color = vza_colors[idx]
 
-                # 样式调整
-                ax.set_xticks([0, 1, 2])
-                ax.set_xticklabels([r'$\rho_{true}$', r'$\rho_{TOA}$', r'$\rho_{retr}$'], fontsize=8)
+                    # 根据 VZA 角度设置标记样式
+                    if vza_val >= 85:
+                        marker = 'D'
+                        markersize = 6
+                        alpha = 0.9
+                    else:
+                        marker = 'o'
+                        markersize = 5
+                        alpha = 0.8
 
-                if row_idx == 0: ax.set_title(rf'SZA ≈ {sza_val}°', fontsize=10, fontweight='bold')
+                    # 绘制虚线连接 ρ_true → ρ_SA
+                    ax.plot([x_true, x_sa], [vals[0], vals[1]],
+                            linestyle='--', linewidth=1.5, color=color, alpha=alpha,
+                            marker='', solid_capstyle='round')
+                    # 绘制实线连接 ρ_SA → ρ_PPA
+                    ax.plot([x_sa, x_ppa], [vals[1], vals[2]],
+                            linestyle='-', linewidth=1.5, color=color, alpha=alpha,
+                            marker='', solid_capstyle='round')
+                    # 绘制三个数据点
+                    ax.scatter([x_true, x_sa, x_ppa], vals,
+                               marker=marker, s=markersize ** 2, color=color, alpha=alpha,
+                               edgecolors='none', zorder=5)
+
+                # 添加垂直虚线分隔左右区域
+                ax.axvline(x=0.5, color='gray', linestyle='--', linewidth=1.0, alpha=0.5)
+
+                # 设置 x 轴刻度
+                ax.set_xticks([x_true, x_sa, x_ppa])
+                ax.set_xticklabels([r'$\rho_{true}$',
+                                    r'$\rho_{TOA}^{SA}$',
+                                    r'$\rho_{TOA}^{PPA}$'],
+                                   fontsize=9)
+
+                # 子图标题
+                if sza_val >= 85:
+                    ax.set_title(rf'SZA = {sza_val}° (Extreme)', fontsize=11,
+                                 fontweight='bold', color='red')
+                else:
+                    ax.set_title(rf'SZA = {sza_val}°', fontsize=11, fontweight='bold')
+
+                # 行标签
                 if col_idx == 0:
-                    ax.set_ylabel('Reflectance', fontsize=9)
-                    ax.text(-0.3, 0.5, cond_params['name'], transform=ax.transAxes,
-                            rotation=90, va='center', fontweight='bold', fontsize=9)
+                    ax.set_ylabel('Reflectance', fontsize=10)
+                    ax.text(-0.4, 0.5, cond_params['name'], transform=ax.transAxes,
+                            rotation=90, va='center', fontweight='bold', fontsize=10)
 
-                ax.grid(True, alpha=0.15)
+                ax.grid(True, alpha=0.2, linestyle='--')
+                ax.tick_params(axis='both', which='major', labelsize=8)
 
         # 颜色条
         cbar_ax = fig.add_axes([0.92, 0.15, 0.02, 0.7])
-        sm = ScalarMappable(cmap=cmap_vza, norm=Normalize(vmin=vza_min, vmax=vza_max))
+        sm = ScalarMappable(cmap=vza_cmap, norm=vza_norm)
         sm.set_array([])
-        cbar = fig.colorbar(sm, cax=cbar_ax)
-        cbar.set_label('View Zenith Angle (°)', fontsize=9)
+        cbar = fig.colorbar(sm, cax=cbar_ax, ticks=np.arange(n_vza))
+        cbar.ax.set_yticklabels([str(v) for v in vza_levels])
+        cbar.set_label('View Zenith Angle (°)', fontsize=10)
+        cbar.ax.tick_params(labelsize=8)
 
-        fig.suptitle('Reflectance Distortion Process (Fixed SZA)', fontsize=12, fontweight='bold', y=0.98)
-        output_path = self.output_dir / "plot1_distortion_fixed_sza.png"
+        # 添加分隔线（极端与非极端列之间）
+        fig.canvas.draw()  # 确保位置已计算
+        for row in range(3):
+            ax_left = axes[row, 2]   # 第三列（非极端最后一列）
+            ax_right = axes[row, 3]  # 第四列（极端第一列）
+            pos_left = ax_left.get_position()
+            pos_right = ax_right.get_position()
+            x_mid = (pos_left.x1 + pos_right.x0) / 2
+            line = mlines.Line2D([x_mid, x_mid], [pos_left.y0, pos_left.y1],
+                                 transform=fig.transFigure, color='black', linewidth=1.5, linestyle='-')
+            fig.lines.append(line)
+
+        extreme_note = ("Note: Extreme VZA (≥85°) marked with diamonds; dashed: ρ_true→ρ_SA, solid: ρ_SA→ρ_PPA; "
+                        "For extreme SZA (≥85°), y-axis uses segmented scaling: [0,1] (1/3 height), [1,20] (2/3 height); "
+                        "major ticks at 0.0, 1.0, 20.0; minor ticks at 5, 10, 15.")
+        fig.text(0.5, 0.02, extreme_note, ha='center', fontsize=9, style='italic')
+
+        fig.suptitle(
+            f'Reflectance Components - Fixed Solar Zenith Angle{param_text}',
+            fontsize=13, fontweight='bold', y=0.98)
+
+        output_filename = f"plot1_distortion_fixed_sza_RAA{int(raa_value):03d}{self.suffix}.png"
+        output_path = self.output_dir / output_filename
         plt.savefig(output_path, dpi=300, bbox_inches='tight')
         plt.close()
-        self.logger.info(f"Plot 1 (Fixed SZA) 已保存: {output_path}")
+        self.logger.info(f"Fixed SZA / RAA={raa_value}° 图已保存: {output_path}")
 
-    def _create_fixed_vza_figure(self, data: pd.DataFrame, fixed_vza_values: List):
+    # ---------- 固定 VZA 图 ----------
+    def _create_fixed_vza_figure(self, data: pd.DataFrame, fixed_vza_values: List,
+                                 param_text: str, raa_value: float):
+        """创建固定 VZA 图形（新布局）"""
+        sza_levels = [0, 15, 30, 45, 60, 75, 80, 85, 86, 87, 88, 89]
+        n_sza = len(sza_levels)
+        base_cmap = plt.cm.plasma
+        sza_colors = [base_cmap(i / (n_sza - 1)) for i in range(n_sza)]
+        sza_cmap = ListedColormap(sza_colors)
+        sza_norm = Normalize(vmin=0, vmax=n_sza - 1)
+
         atm_order = ['clean', 'average', 'polluted']
-        fig, axes = plt.subplots(3, 4, figsize=(12, 9), gridspec_kw={'hspace': 0.3, 'wspace': 0.25})
+        fig, axes = plt.subplots(3, 5, figsize=(18, 10),
+                                 gridspec_kw={'hspace': 0.35, 'wspace': 0.25})
+        if axes.ndim == 1:
+            axes = axes.reshape(3, 5)
 
-        colors_sza = [(1.0, 1.0, 0.9), (1.0, 0.6, 0.2), (0.5, 0.1, 0.1)]
-        cmap_sza = LinearSegmentedColormap.from_list('wide_gradient_sza', colors_sza, N=256)
-        sza_min, sza_max = 0, 85
+        x_true, x_sa, x_ppa = 0.0, 1.0, 1.3
 
         for row_idx, condition_key in enumerate(atm_order):
             cond_params = self.atmospheric_conditions[condition_key]
             cond_data = data[
                 (np.abs(data['aod550'] - cond_params['aod550']) < 0.05) &
-                (np.abs(data['h2o'] - cond_params['h2o']) < 0.5)
+                (np.abs(data['h2o'] - cond_params['h2o']) < 0.5) &
+                (np.abs(data['rho_true'] - self.fixed_rho_true) < 0.001) &
+                (np.abs(data['raa'] - raa_value) < 0.1)
                 ]
 
             for col_idx, vza_val in enumerate(fixed_vza_values):
@@ -247,133 +481,510 @@ class VisualizationSuite:
                     ax.axis('off')
                     continue
 
-                sza_in_data = np.sort(vza_data['sza'].unique())
+                # 根据 vza_val 是否为极端角度设置 y 轴范围和尺度
+                if vza_val >= 85:
+                    # 极端角度：使用新版两段式尺度，范围 0-20
+                    ax.set_yscale('function', functions=(self._forward_segmented_v2, self._inverse_segmented_v2))
+                    ax.set_ylim(0, 20)
+                    # 主刻度
+                    ax.set_yticks([0.0, 1.0, 20.0])
+                    ax.set_yticklabels(['0.0', '1.0', '20.0'])
+                    # 次刻度
+                    ax.set_yticks([5.0, 10.0, 15.0], minor=True)
+                    ax.set_yticklabels(['5', '10', '15'], minor=True)
+                    # 添加分界线
+                    ax.axhline(y=1, color='gray', linestyle=':', linewidth=0.8, alpha=0.7)
+                else:
+                    # 非极端角度：线性 [0,1]
+                    ax.set_ylim(0, 1)
+                    ax.set_yticks(np.linspace(0, 1, 6))
+                    ax.set_yticklabels([f'{y:.1f}' for y in np.linspace(0, 1, 6)], fontsize=8)
+                    ax.axhline(y=0, color='gray', linestyle=':', linewidth=0.8, alpha=0.7)
+                    ax.axhline(y=1, color='gray', linestyle=':', linewidth=0.8, alpha=0.7)
 
-                for sza_val in sza_in_data:
+                # 绘制各个 SZA 的数据点及连线
+                for sza_val in sza_levels:
                     point_data = vza_data[np.abs(vza_data['sza'] - sza_val) < 2.0]
-                    if len(point_data) > 0:
-                        vals = [
-                            point_data['rho_true'].mean(),
-                            point_data['rho_toa'].mean(),
-                            point_data['rho_retrieved'].mean()
-                        ]
+                    if point_data.empty:
+                        continue
 
-                        color_norm = (sza_val - sza_min) / (sza_max - sza_min)
-                        color = cmap_sza(color_norm)
+                    vals = [
+                        point_data['rho_true'].mean(),
+                        point_data['rho_toa_sa'].mean(),
+                        point_data['rho_toa_ppa'].mean()
+                    ]
 
-                        ax.plot([0, 1, 2], vals, '-', linewidth=1.2, markersize=4, marker='s',
-                                color=color, alpha=0.8)
+                    idx = sza_levels.index(sza_val)
+                    color = sza_colors[idx]
 
-                # 样式
-                ax.set_xticks([0, 1, 2])
-                ax.set_xticklabels([r'$\rho_{true}$', r'$\rho_{TOA}$', r'$\rho_{retr}$'], fontsize=8)
+                    if sza_val >= 85:
+                        marker = 's'
+                        markersize = 6
+                        alpha = 0.9
+                    else:
+                        marker = 's'
+                        markersize = 5
+                        alpha = 0.8
 
-                if row_idx == 0: ax.set_title(rf'VZA ≈ {vza_val}°', fontsize=10, fontweight='bold')
+                    # 绘制虚线连接 ρ_true → ρ_SA
+                    ax.plot([x_true, x_sa], [vals[0], vals[1]],
+                            linestyle='--', linewidth=1.5, color=color, alpha=alpha,
+                            marker='')
+                    # 绘制实线连接 ρ_SA → ρ_PPA
+                    ax.plot([x_sa, x_ppa], [vals[1], vals[2]],
+                            linestyle='-', linewidth=1.5, color=color, alpha=alpha,
+                            marker='')
+                    # 绘制三个数据点
+                    ax.scatter([x_true, x_sa, x_ppa], vals,
+                               marker=marker, s=markersize ** 2, color=color, alpha=alpha,
+                               edgecolors='none', zorder=5)
+
+                ax.axvline(x=0.5, color='gray', linestyle='--', linewidth=1.0, alpha=0.5)
+
+                ax.set_xticks([x_true, x_sa, x_ppa])
+                ax.set_xticklabels([r'$\rho_{true}$',
+                                    r'$\rho_{TOA}^{SA}$',
+                                    r'$\rho_{TOA}^{PPA}$'],
+                                   fontsize=9)
+
+                if vza_val >= 85:
+                    ax.set_title(rf'VZA = {vza_val}° (Extreme)', fontsize=11,
+                                 fontweight='bold', color='red')
+                else:
+                    ax.set_title(rf'VZA = {vza_val}°', fontsize=11, fontweight='bold')
+
                 if col_idx == 0:
-                    ax.set_ylabel('Reflectance', fontsize=9)
-                    ax.text(-0.3, 0.5, cond_params['name'], transform=ax.transAxes,
-                            rotation=90, va='center', fontweight='bold', fontsize=9)
-                ax.grid(True, alpha=0.15)
+                    ax.set_ylabel('Reflectance', fontsize=10)
+                    ax.text(-0.4, 0.5, cond_params['name'], transform=ax.transAxes,
+                            rotation=90, va='center', fontweight='bold', fontsize=10)
 
+                ax.grid(True, alpha=0.2, linestyle='--')
+                ax.tick_params(axis='both', which='major', labelsize=8)
+
+        # 颜色条
         cbar_ax = fig.add_axes([0.92, 0.15, 0.02, 0.7])
-        sm = ScalarMappable(cmap=cmap_sza, norm=Normalize(vmin=sza_min, vmax=sza_max))
+        sm = ScalarMappable(cmap=sza_cmap, norm=sza_norm)
         sm.set_array([])
-        cbar = fig.colorbar(sm, cax=cbar_ax)
-        cbar.set_label('Solar Zenith Angle (°)', fontsize=9)
+        cbar = fig.colorbar(sm, cax=cbar_ax, ticks=np.arange(n_sza))
+        cbar.ax.set_yticklabels([str(v) for v in sza_levels])
+        cbar.set_label('Solar Zenith Angle (°)', fontsize=10)
+        cbar.ax.tick_params(labelsize=8)
 
-        fig.suptitle('Reflectance Distortion Process (Fixed VZA)', fontsize=12, fontweight='bold', y=0.98)
-        output_path = self.output_dir / "plot1_distortion_fixed_vza.png"
+        # 添加分隔线（极端与非极端列之间）
+        fig.canvas.draw()
+        for row in range(3):
+            ax_left = axes[row, 2]
+            ax_right = axes[row, 3]
+            pos_left = ax_left.get_position()
+            pos_right = ax_right.get_position()
+            x_mid = (pos_left.x1 + pos_right.x0) / 2
+            line = mlines.Line2D([x_mid, x_mid], [pos_left.y0, pos_left.y1],
+                                 transform=fig.transFigure, color='black', linewidth=1.5, linestyle='-')
+            fig.lines.append(line)
+
+        extreme_note = ("Note: Extreme SZA (≥85°) marked with squares; dashed: ρ_true→ρ_SA, solid: ρ_SA→ρ_PPA; "
+                        "For extreme VZA (≥85°), y-axis uses segmented scaling: [0,1] (1/3 height), [1,20] (2/3 height); "
+                        "major ticks at 0.0, 1.0, 20.0; minor ticks at 5, 10, 15.")
+        fig.text(0.5, 0.02, extreme_note, ha='center', fontsize=9, style='italic')
+
+        fig.suptitle(
+            f'Reflectance Components - Fixed View Zenith Angle{param_text}',
+            fontsize=13, fontweight='bold', y=0.98)
+
+        output_filename = f"plot1_distortion_fixed_vza_RAA{int(raa_value):03d}{self.suffix}.png"
+        output_path = self.output_dir / output_filename
         plt.savefig(output_path, dpi=300, bbox_inches='tight')
         plt.close()
-        self.logger.info(f"Plot 1 (Fixed VZA) 已保存: {output_path}")
+        self.logger.info(f"Fixed VZA / RAA={raa_value}° 图已保存: {output_path}")
 
     # =========================================================================
-    # Part 2: Contour Plots
+    # Part 2: Contour Plots for ΔTOA (modified according to requirements)
     # =========================================================================
-    def plot_error_contours(self, error_type: str = 'absolute'):
-        """生成 3(AOD) x 6(Band) 的 Contour 图"""
+    def plot_delta_toa_contours(self):
+        """生成 3(AOD) x 6(Band) 的 Contour 图，展示 ΔTOA 随角度的变化"""
+        data = self._load_validation_grid_data()
+        if data.empty:
+            self.logger.warning("数据为空，跳过 Contour 图")
+            return
+
+        self._validate_contour_data_quality(data)
+
+        raa_values = ExperimentConfig.VALIDATION_GRID.get('raa', [self.fixed_raa])
+        if not isinstance(raa_values, list):
+            raa_values = [raa_values]
+        if not raa_values:
+            raa_values = [self.fixed_raa]
+
+        self.logger.info(f"将为以下 RAA 值生成 ΔTOA Contour 图: {raa_values}")
+
+        for raa in raa_values:
+            self._plot_delta_toa_contour_single(data, raa)
+
+    def _plot_delta_toa_contour_single(self, data: pd.DataFrame, raa: float):
+        """为单个 RAA 绘制 ΔTOA Contour 图（自动色标，坐标轴只到89°）"""
+        filtered_data = data[
+            (np.abs(data['rho_true'] - self.fixed_rho_true) < 0.0001) &
+            (np.abs(data['raa'] - raa) < 0.01)
+        ].copy()
+
+        if filtered_data.empty:
+            self.logger.error(f"错误: 没有找到 rho_true={self.fixed_rho_true}, raa={raa} 的精确匹配数据")
+            self.logger.info("尝试使用所有数据，但结果可能不准确...")
+            filtered_data = data.copy()
+
+        self.logger.info(f"Contour图 (RAA={raa}) 使用数据: {len(filtered_data)} 条记录")
+
+        target_col = 'delta_toa'
+
         atm_order = ['clean', 'average', 'polluted']
         bands = ['band1', 'band2', 'band3', 'band4', 'band5', 'band6']
 
-        # 根据 Config 中的 VALIDATION_GRID 设置轴
-        sza_grid = ExperimentConfig.VALIDATION_GRID['sza']
-        vza_grid = ExperimentConfig.VALIDATION_GRID['vza']
+        # 原始角度网格（可能包含90°）
+        sza_grid_full = np.array(ExperimentConfig.VALIDATION_GRID['sza'])
+        vza_grid_full = np.array(ExperimentConfig.VALIDATION_GRID['vza'])
 
-        error_col = 'error_absolute' if error_type == 'absolute' else 'error_relative'
+        # 仅保留 ≤89° 的角度
+        sza_mask = sza_grid_full <= 89
+        vza_mask = vza_grid_full <= 89
+        sza_grid = sza_grid_full[sza_mask]
+        vza_grid = vza_grid_full[vza_mask]
 
-        # 确定 Color Scale
-        all_vals = self.all_data[error_col].dropna().values
-        if len(all_vals) == 0: return
+        # 重新建立索引映射（仅用于有效角度）
+        sza_to_idx = {val: i for i, val in enumerate(sza_grid)}
+        vza_to_idx = {val: i for i, val in enumerate(vza_grid)}
 
-        if error_type == 'absolute':
-            vmin, vmax = -0.15, 0.02  # 略微宽松一点的范围
+        # 创建网格坐标矩阵（用于绘图）
+        X_idx, Y_idx = np.meshgrid(np.arange(len(sza_grid)), np.arange(len(vza_grid)))
+
+        # 记录极端角度位置（用于背景高亮）
+        extreme_sza_indices = np.where(sza_grid >= 85)[0]
+        extreme_vza_indices = np.where(vza_grid >= 85)[0]
+
+        # 获取全局数据范围用于自动色标
+        all_vals = filtered_data[target_col].dropna()
+        if len(all_vals) == 0:
+            self.logger.error("没有有效的 ΔTOA 值，跳过该 RAA 绘图")
+            return
+
+        vmin_auto = all_vals.min()
+        vmax_auto = all_vals.max()
+        self.logger.info(f"自动色标范围: vmin={vmin_auto:.4f}, vmax={vmax_auto:.4f}")
+
+        # 设置归一化，确保 0 为白色（使用 TwoSlopeNorm）
+        if vmin_auto < 0 < vmax_auto:
+            norm = TwoSlopeNorm(vcenter=0, vmin=vmin_auto, vmax=vmax_auto)
         else:
-            vmin, vmax = np.percentile(all_vals, 1), np.percentile(all_vals, 99)
-            if vmax > 0: vmax = 0.05  # 允许稍微正一点的误差
+            # 如果数据全部同号，回退到线性归一化（但中心不为0白色）
+            norm = Normalize(vmin=vmin_auto, vmax=vmax_auto)
+            self.logger.warning("数据没有跨越0，使用线性归一化，0可能不是白色")
 
-        colors = [(0.0, 0.15, 0.7), (0.5, 0.7, 1.0), (0.95, 0.98, 1.0)]
-        cmap = LinearSegmentedColormap.from_list('error_cmap', colors, N=256)
-        norm = Normalize(vmin=vmin, vmax=vmax)
+        cmap = 'RdBu_r'  # 红色为正，蓝色为负，白色为0
 
         fig, axes = plt.subplots(3, 6, figsize=(24, 12), gridspec_kw={'hspace': 0.3, 'wspace': 0.3})
 
         for row_idx, condition_key in enumerate(atm_order):
             cond_params = self.atmospheric_conditions[condition_key]
-            cond_data = self.all_data[
-                (np.abs(self.all_data['aod550'] - cond_params['aod550']) < 0.05) &
-                (np.abs(self.all_data['h2o'] - cond_params['h2o']) < 0.5)
-                ]
+            cond_data = filtered_data[
+                (np.abs(filtered_data['aod550'] - cond_params['aod550']) < 0.001) &
+                (np.abs(filtered_data['h2o'] - cond_params['h2o']) < 0.01)
+            ]
 
             for col_idx, band in enumerate(bands):
                 ax = axes[row_idx, col_idx]
-                band_data = cond_data[cond_data['band'] == band]
+                band_data = cond_data[cond_data['band'] == band].copy()
 
                 if band_data.empty:
-                    ax.text(0.5, 0.5, "No Data", ha='center', va='center')
+                    ax.text(0.5, 0.5, "No Data", ha='center', va='center', fontsize=10)
+                    ax.set_xlabel('SZA (°)', fontsize=9)
+                    ax.set_ylabel('VZA (°)', fontsize=9)
                     continue
 
-                # 构建网格矩阵
-                matrix = np.zeros((len(vza_grid), len(sza_grid)))
-                matrix.fill(np.nan)
+                # 构建矩阵（仅包含 ≤89° 的角度）
+                matrix = np.full((len(vza_grid), len(sza_grid)), np.nan)
 
-                for i, vza in enumerate(vza_grid):
-                    for j, sza in enumerate(sza_grid):
-                        val = band_data[
-                            (np.abs(band_data['sza'] - sza) < 1.0) &
-                            (np.abs(band_data['vza'] - vza) < 1.0)
-                            ][error_col].median()
-                        matrix[i, j] = val
+                # 将数据点四舍五入到最近的网格点
+                band_data['sza_rounded'] = band_data['sza'].apply(
+                    lambda x: min(sza_grid, key=lambda g: abs(g - x)) if x <= 89 else np.nan
+                )
+                band_data['vza_rounded'] = band_data['vza'].apply(
+                    lambda x: min(vza_grid, key=lambda g: abs(g - x)) if x <= 89 else np.nan
+                )
+                # 丢弃角度 >89 的数据
+                band_data.dropna(subset=['sza_rounded', 'vza_rounded'], inplace=True)
 
-                if not np.all(np.isnan(matrix)):
-                    X, Y = np.meshgrid(sza_grid, vza_grid)
-                    contour = ax.contourf(X, Y, matrix, levels=15, cmap=cmap, norm=norm, extend='both')
-                    # 只有当数据波动足够大时才画线
-                    if np.nanstd(matrix) > 0.001:
-                        ax.contour(X, Y, matrix, levels=5, colors='black', linewidths=0.5, alpha=0.5)
+                # 按网格点分组，取中位数
+                grouped = band_data.groupby(['vza_rounded', 'sza_rounded'])[target_col].median().reset_index()
 
-                # Labels
+                for _, row in grouped.iterrows():
+                    sza_idx = sza_to_idx[row['sza_rounded']]
+                    vza_idx = vza_to_idx[row['vza_rounded']]
+                    matrix[vza_idx, sza_idx] = row[target_col]
+
+                coverage = np.sum(~np.isnan(matrix)) / matrix.size * 100
+                if coverage < 50:
+                    self.logger.warning(f"波段 {band}, 条件 {condition_key}: 数据覆盖率仅 {coverage:.1f}%")
+
+                if np.sum(~np.isnan(matrix)) > 0:
+                    # 等高线层级：使用自动范围生成 21 层
+                    levels = np.linspace(vmin_auto, vmax_auto, 21)
+                    contour = ax.contourf(X_idx, Y_idx, matrix, levels=levels, cmap=cmap, norm=norm, extend='both')
+
+                    # 添加黑色等高线（可选）
+                    if np.nanstd(matrix) > 0.0001:
+                        contour_levels = np.linspace(vmin_auto, vmax_auto, 6)[1:-1]
+                        ax.contour(X_idx, Y_idx, matrix, levels=contour_levels, colors='black', linewidths=0.5, alpha=0.5)
+
+                    # 标记极端角度区域
+                    for sza_idx in extreme_sza_indices:
+                        ax.axvline(x=sza_idx, color='yellow', linestyle=':', linewidth=1.5, alpha=0.7)
+                    for vza_idx in extreme_vza_indices:
+                        ax.axhline(y=vza_idx, color='yellow', linestyle=':', linewidth=1.5, alpha=0.7)
+
+                    # 半透明红色背景表示极端角度区域
+                    if len(extreme_sza_indices) > 0:
+                        ax.axvspan(extreme_sza_indices[0] - 0.5, extreme_sza_indices[-1] + 0.5,
+                                   alpha=0.1, color='red')
+                    if len(extreme_vza_indices) > 0:
+                        ax.axhspan(extreme_vza_indices[0] - 0.5, extreme_vza_indices[-1] + 0.5,
+                                   alpha=0.1, color='red')
+
+                    # 绘制数据点位置（小叉）
+                    ax.scatter([sza_to_idx[v] for v in band_data['sza_rounded']],
+                               [vza_to_idx[v] for v in band_data['vza_rounded']],
+                               s=10, color='black', alpha=0.3, marker='x')
+                else:
+                    ax.text(0.5, 0.5, "No Valid Data", ha='center', va='center', fontsize=10)
+
+                # 子图标题（波段+波长）
                 if row_idx == 0:
                     wl = ExperimentConfig.BANDS[band]['wavelength']
-                    ax.set_title(f'Band {col_idx + 1} ({wl}µm)', fontweight='bold')
+                    ax.set_title(f'Band {col_idx+1} ({wl}µm)', fontweight='bold', fontsize=10)
+
+                # 行标签（大气条件）
                 if col_idx == 0:
                     ax.text(-0.35, 0.5, cond_params['name'], transform=ax.transAxes,
-                            rotation=90, va='center', fontweight='bold')
+                            rotation=90, va='center', fontweight='bold', fontsize=10)
 
-                ax.set_xlabel('SZA')
-                ax.set_ylabel('VZA')
-                ax.set_xticks(sza_grid[::2])  # 稀疏刻度
-                ax.set_yticks(vza_grid[::2])
+                ax.set_xlabel('Solar Zenith Angle (°)', fontsize=9)
+                ax.set_ylabel('View Zenith Angle (°)', fontsize=9)
 
+                # 设置 x 轴刻度：只显示 ≤89° 的标签，且用 * 标记极端角度
+                x_ticks = np.arange(len(sza_grid))
+                x_labels = [f'{int(x)}' + ('*' if x >= 85 else '') for x in sza_grid]
+                ax.set_xticks(x_ticks)
+                ax.set_xticklabels(x_labels, fontsize=7, rotation=45)
+
+                y_ticks = np.arange(len(vza_grid))
+                y_labels = [f'{int(y)}' + ('*' if y >= 85 else '') for y in vza_grid]
+                ax.set_yticks(y_ticks)
+                ax.set_yticklabels(y_labels, fontsize=7)
+
+                # 设置坐标轴范围至最后一个有效角度索引
+                ax.set_xlim(-0.5, len(sza_grid) - 0.5)
+                ax.set_ylim(-0.5, len(vza_grid) - 0.5)
+
+                ax.tick_params(axis='both', which='major', labelsize=8)
+                ax.grid(True, alpha=0.2)
+
+        # 颜色条
         cbar_ax = fig.add_axes([0.92, 0.15, 0.02, 0.7])
         sm = ScalarMappable(cmap=cmap, norm=norm)
         sm.set_array([])
-        cbar = fig.colorbar(sm, cax=cbar_ax)
-        cbar.set_label(f'Median {error_type.capitalize()} Error')
 
-        fig.suptitle(f'{error_type.capitalize()} Error Contour Plots', fontsize=14, fontweight='bold', y=0.98)
+        # 自动生成刻度（7个左右）
+        ticks = np.linspace(vmin_auto, vmax_auto, 7)
+        cbar = fig.colorbar(sm, cax=cbar_ax, ticks=ticks, format='%.2f')
+        cbar.set_label('ΔTOA = ρ_TOA^SA - ρ_TOA^PPA (auto-scaled)', fontsize=10)
+        cbar.ax.tick_params(labelsize=8)
 
-        output_path = self.output_dir / f"plot2_contour_{error_type}.png"
+        extreme_note = ("* denotes extreme angles (≥85°); yellow dotted lines and red shading highlight extreme angle regions; "
+                        "color scale automatically adjusted to data range, with white at zero.")
+        fig.text(0.5, 0.02, extreme_note, ha='center', fontsize=9, style='italic')
+
+        param_text = f" (ρ={self.fixed_rho_true}, RAA={raa}°) - SZA/VZA ≤ 89°"
+        fig.suptitle(f'ΔTOA Contour (auto-scaled, white at 0){param_text}',
+                     fontsize=14, fontweight='bold', y=0.98)
+
+        output_filename = f"plot2_delta_toa_contour_RAA{int(raa):03d}{self.suffix}.png"
+        output_path = self.output_dir / output_filename
         plt.savefig(output_path, dpi=300, bbox_inches='tight')
         plt.close()
-        self.logger.info(f"Plot 2 (Contour {error_type}) 已保存: {output_path}")
 
+        self.logger.info(f"Plot 2 (RAA={raa}) 已保存: {output_path}")
+        self._output_contour_diagnostics(filtered_data, target_col)
+        self._output_extreme_angle_statistics(filtered_data, target_col)
+
+    def _validate_contour_data_quality(self, data: pd.DataFrame):
+        """验证Contour图数据质量"""
+        self.logger.info("验证Contour图数据质量...")
+        if 'delta_toa' in data.columns:
+            mean_val = data['delta_toa'].mean()
+            std_val = data['delta_toa'].std()
+            min_val = data['delta_toa'].min()
+            max_val = data['delta_toa'].max()
+            self.logger.info(f"  ΔTOA 全局统计: 均值={mean_val:.6f}, 标准差={std_val:.6f}, 范围=[{min_val:.6f}, {max_val:.6f}]")
+            if max_val > 2.0 or min_val < -2.0:
+                self.logger.warning("  ΔTOA 超出 [-2,2] 范围，数据加载时已截断，请留意。")
+
+    def _output_contour_diagnostics(self, data: pd.DataFrame, target_col: str):
+        """输出Contour图诊断信息"""
+        self.logger.info("=== ΔTOA Contour图诊断信息 ===")
+        bands = ['band1', 'band2', 'band3', 'band4', 'band5', 'band6']
+        for band in bands:
+            band_data = data[data['band'] == band]
+            if not band_data.empty and target_col in band_data.columns:
+                vals = band_data[target_col]
+                self.logger.info(f"波段 {band}:")
+                self.logger.info(f"  记录数: {len(band_data)}")
+                self.logger.info(f"  均值: {vals.mean():.6f}")
+                self.logger.info(f"  标准差: {vals.std():.6f}")
+                self.logger.info(f"  范围: [{vals.min():.6f}, {vals.max():.6f}]")
+                large = vals[np.abs(vals) > 1.8]  # 接近边界值的统计
+                if len(large) > 0:
+                    self.logger.warning(f"  发现 {len(large)} 个 |ΔTOA|>1.8 的值（接近截断边界）")
+
+    def _output_extreme_angle_statistics(self, data: pd.DataFrame, target_col: str):
+        """输出极端角度的统计信息"""
+        self.logger.info("=== 极端角度统计信息 (SZA/VZA ≥ 85°) ===")
+        bands = ['band1', 'band2', 'band3', 'band4', 'band5', 'band6']
+        for band in bands:
+            band_data = data[data['band'] == band]
+            if not band_data.empty and target_col in band_data.columns:
+                extreme_data = band_data[(band_data['sza'] >= 85) | (band_data['vza'] >= 85)]
+                if not extreme_data.empty:
+                    vals = extreme_data[target_col]
+                    self.logger.info(f"波段 {band} 极端角度:")
+                    self.logger.info(f"  记录数: {len(extreme_data)}")
+                    self.logger.info(f"  均值: {vals.mean():.6f}")
+                    self.logger.info(f"  标准差: {vals.std():.6f}")
+                    self.logger.info(f"  范围: [{vals.min():.6f}, {vals.max():.6f}]")
+                    for angle_type in ['sza', 'vza']:
+                        for threshold in [85, 87, 89]:
+                            subset = band_data[band_data[angle_type] >= threshold]
+                            if not subset.empty:
+                                sub_vals = subset[target_col]
+                                self.logger.info(
+                                    f"    {angle_type.upper()}≥{threshold}°: {len(subset)} 条记录, "
+                                    f"均值={sub_vals.mean():.6f}, 极值=[{sub_vals.min():.6f}, {sub_vals.max():.6f}]")
+
+    # =========================================================================
+    # 闭合性误差分析图 - 改为 ΔTOA 分析（可选）
+    # =========================================================================
+    def plot_delta_toa_analysis(self):
+        """绘制 ΔTOA 随角度变化的分析图"""
+        data = self._load_validation_grid_data()
+        if data.empty:
+            self.logger.error("数据为空，无法进行分析")
+            return
+
+        filtered_data = data[
+            (np.abs(data['rho_true'] - self.fixed_rho_true) < 0.001) &
+            (np.abs(data['raa'] - self.fixed_raa) < 0.1)
+        ].copy()
+
+        if filtered_data.empty:
+            self.logger.warning(f"没有找到 rho_true≈{self.fixed_rho_true}, raa≈{self.fixed_raa} 的数据，使用所有数据")
+            filtered_data = data.copy()
+
+        fig, axes = plt.subplots(2, 3, figsize=(15, 10))
+        axes = axes.flatten()
+
+        bands = ['band1', 'band2', 'band3', 'band4', 'band5', 'band6']
+
+        for idx, band in enumerate(bands):
+            if idx >= len(axes):
+                break
+            ax = axes[idx]
+            band_data = filtered_data[filtered_data['band'] == band]
+
+            if band_data.empty:
+                ax.text(0.5, 0.5, "No Data", ha='center', va='center')
+                ax.set_xlabel('SZA (°)', fontsize=9)
+                ax.set_ylabel('ΔTOA', fontsize=9)
+                ax.set_title(f'{band} - ΔTOA vs SZA', fontsize=10)
+                continue
+
+            unique_sza = np.sort(band_data['sza'].unique())
+            mean_delta = []
+            std_delta = []
+
+            for sza in unique_sza:
+                sza_data = band_data[np.abs(band_data['sza'] - sza) < 2.0]
+                if len(sza_data) > 0:
+                    delta_vals = sza_data['delta_toa']
+                    mean_delta.append(delta_vals.mean())
+                    std_delta.append(delta_vals.std())
+                else:
+                    mean_delta.append(np.nan)
+                    std_delta.append(np.nan)
+
+            ax.errorbar(unique_sza, mean_delta, yerr=std_delta,
+                        marker='o', linestyle='-', capsize=3, linewidth=1.5)
+
+            extreme_mask = unique_sza >= 85
+            if np.any(extreme_mask):
+                ax.fill_between(unique_sza[extreme_mask],
+                                np.array(mean_delta)[extreme_mask] - np.array(std_delta)[extreme_mask],
+                                np.array(mean_delta)[extreme_mask] + np.array(std_delta)[extreme_mask],
+                                alpha=0.3, color='red', label='Extreme SZA (≥85°)')
+
+            ax.set_xlabel('Solar Zenith Angle (°)', fontsize=9)
+            ax.set_ylabel('ΔTOA', fontsize=9)
+            ax.set_title(f'{band} - ΔTOA vs SZA (ρ={self.fixed_rho_true})', fontsize=10)
+            ax.grid(True, alpha=0.3)
+
+            if np.any(extreme_mask):
+                ax.legend(fontsize=8)
+
+            # 添加统计信息
+            mean_delta_all = band_data['delta_toa'].mean()
+            std_delta_all = band_data['delta_toa'].std()
+            ax.text(0.05, 0.95, f'Mean: {mean_delta_all:.6f}\nStd: {std_delta_all:.6f}',
+                    transform=ax.transAxes, fontsize=8, verticalalignment='top',
+                    bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
+
+        plt.tight_layout()
+        output_filename = f"delta_toa_analysis{self.suffix}.png"
+        output_path = self.output_dir / output_filename
+        plt.savefig(output_path, dpi=300, bbox_inches='tight')
+        plt.close()
+        self.logger.info(f"ΔTOA 分析图已保存: {output_path}")
+
+
+def main():
+    """命令行入口函数"""
+    parser = argparse.ArgumentParser(description='Visualization Suite (新框架: ΔTOA)')
+    parser.add_argument('--suffix', type=str, default='',
+                        help='自定义文件后缀')
+    parser.add_argument('--data_dir', type=str, default=None,
+                        help='自定义数据目录')
+    parser.add_argument('--rho_true', type=float, default=0.3,
+                        help='固定地表反射率值 (默认: 0.3)')
+    parser.add_argument('--raa', type=float, default=0.0,
+                        help='固定相对方位角 (默认: 0.0)')
+    parser.add_argument('--run_all', action='store_true',
+                        help='运行所有验证网格绘图')
+    parser.add_argument('--run_delta_analysis', action='store_true',
+                        help='运行 ΔTOA 分析图')
+
+    args = parser.parse_args()
+
+    visualizer = VisualizationSuite(
+        data_dir=args.data_dir,
+        suffix=args.suffix,
+        fixed_rho_true=args.rho_true,
+        fixed_raa=args.raa
+    )
+
+    if args.run_all:
+        visualizer.run_all_plots()
+
+    if args.run_delta_analysis:
+        visualizer.plot_delta_toa_analysis()
+
+    if not any([args.run_all, args.run_delta_analysis]):
+        visualizer.run_all_plots()
+
+
+if __name__ == "__main__":
+    main()

@@ -24,6 +24,7 @@ import hashlib
 
 # Py6S for 6S simulations
 from Py6S import *
+import sixs_inversion
 
 warnings.filterwarnings('ignore')
 
@@ -145,139 +146,73 @@ class MERRA2DataLoader:
 
 # ==================== 6S Worker ====================
 class SixSInversionWorker:
-    """6S反演工作器"""
+    """6S反演工作器，现在调用缓存函数"""
 
     def __init__(self, band_wavelength: float):
         self.band_wavelength = band_wavelength
-        self._precompute_atmos_profiles()
-
-    def _precompute_atmos_profiles(self):
-        """预计算大气廓线映射"""
-        self.atmos_profile_map = {
-            'MidlatitudeSummer': AtmosProfile.PredefinedType(AtmosProfile.MidlatitudeSummer),
-            'MidlatitudeWinter': AtmosProfile.PredefinedType(AtmosProfile.MidlatitudeWinter),
-            'Tropical': AtmosProfile.PredefinedType(AtmosProfile.Tropical),
-            'SubarcticSummer': AtmosProfile.PredefinedType(AtmosProfile.SubarcticSummer),
-            'SubarcticWinter': AtmosProfile.PredefinedType(AtmosProfile.SubarcticWinter),
-        }
-
-        self.aero_profile_map = {
-            'Continental': AeroProfile.PredefinedType(AeroProfile.Continental),
-            'Maritime': AeroProfile.PredefinedType(AeroProfile.Maritime),
-            'Urban': AeroProfile.PredefinedType(AeroProfile.Urban),
-            'Desert': AeroProfile.PredefinedType(AeroProfile.Desert),
-            'BiomassBurning': AeroProfile.PredefinedType(AeroProfile.BiomassBurning),
-        }
-
-    def create_sixs_instance(self, params: dict):
-        """创建6S实例 - 修改为与6S+BRDF代码一致的大气廓线选择"""
-        try:
-            s = SixS()
-            s.wavelength = Wavelength(self.band_wavelength)
-
-            # 配置大气廓线 - 改为与6S+BRDF一致
-            lat = params.get('lat', 0.0)
-            date = params.get('date', datetime.now())
-
-            # 使用连续的水汽和臭氧值
-            water = params.get('h2o', 2.0)
-            ozone = params.get('o3', 0.3)
-
-            # 检查是否有效
-            if not np.isnan(water) and not np.isnan(ozone) and water > 0 and ozone > 0:
-                s.atmos_profile = AtmosProfile.UserWaterAndOzone(water, ozone)
-                params['atmos_profile'] = 'UserWaterAndOzone'
-            else:
-                # 使用FromLatitudeAndDate自动选择大气廓线（与6S+BRDF一致）
-                s.atmos_profile = AtmosProfile.FromLatitudeAndDate(lat, date)
-                params['atmos_profile'] = str(s.atmos_profile).split('.')[-1]
-
-            # 配置气溶胶
-            aero_key = params.get('aero_profile', 'Continental')
-            s.aero_profile = self.aero_profile_map.get(aero_key, AeroProfile.PredefinedType(AeroProfile.Continental))
-
-            # 设置气溶胶光学厚度
-            aod_val = params.get('aod550', 0.1)
-            if not np.isnan(aod_val) and aod_val >= 0:
-                s.aot550 = aod_val
-            else:
-                s.aot550 = 0.1
-
-            # 配置几何参数
-            s.geometry = Geometry.User()
-            s.geometry.solar_z = params['sza']
-            s.geometry.solar_a = params.get('phi', 0.0)
-            s.geometry.view_z = params['vza']
-            s.geometry.view_a = 0.0  # 固定观测方位角
-
-            # 配置高度
-            s.altitudes = Altitudes()
-            s.altitudes.set_target_custom_altitude(params.get('target_altitude', 0.0))
-            s.altitudes.set_sensor_satellite_level()
-
-            return s, params
-        except Exception as e:
-            print(f"创建6S实例失败: {e}")
-            return None, params
+        # 注意：不再需要预计算大气廓线，因为缓存模块会处理
 
     def run_inversion(self, params: dict):
-        """运行6S反演：TOA -> LSR"""
+        """
+        运行反演：TOA -> LSR，使用缓存函数
+        """
         try:
-            # 检查是否使用默认MERRA2数据
-            if params.get('is_default', False):
-                params['merra2_warning'] = 'Used default MERRA2 data'
-
-            # 创建6S实例
-            s, params = self.create_sixs_instance(params)
-            if s is None:
-                return {
-                    'success': False,
-                    'error': '创建6S实例失败',
-                    **params
-                }
-
-            # TOA反射率
-            rho_toa = params.get('rho_toa', 0.2)
-
-            # 运行大气校正
-            s.atmos_corr = AtmosCorr.AtmosCorrLambertianFromReflectance(rho_toa)
-            s.run()
-
-            # 获取反演的地表反射率
-            rho_lsr = s.outputs.values['pixel_reflectance']
-            rho_retrieved = rho_lsr  # 添加这个别名用于兼容性
-
-            # 清理实例
-            del s
-            gc.collect()
-
-            return {
-                'success': True,
-                'rho_toa': rho_toa,
-                'rho_lsr': rho_lsr,
-                'rho_retrieved': rho_retrieved,  # 添加这个字段
+            # 准备传入缓存模块的参数
+            inv_params = {
                 'sza': params['sza'],
                 'vza': params['vza'],
                 'raa': params.get('raa', 0.0),
+                'phi': params.get('phi', 0.0),
                 'aod550': params.get('aod550', 0.1),
                 'h2o': params.get('h2o', 2.0),
                 'o3': params.get('o3', 0.3),
+                'rho_toa': params['rho_toa'],
                 'wavelength': self.band_wavelength,
-                'band': params.get('band', '01'),
-                'station': params.get('station', 'unknown'),
-                'datetime_utc': params.get('datetime_utc'),
-                'datetime_bj': params.get('datetime_bj'),
-                'original_index': params.get('original_index', -1),
-                'atmos_profile': params.get('atmos_profile', 'Unknown'),
-                'is_default_merra2': params.get('is_default', False),
-                'merra2_warning': params.get('merra2_warning', '')
+                'atmos_profile': params.get('atmos_profile', 'MidlatitudeSummer'),
+                'aero_profile': params.get('aero_profile', 'Continental'),
+                'target_altitude': params.get('target_altitude', 0.0),
+                # 可选：传递日期和纬度，但目前未用于大气廓线选择（可根据需要启用）
+                # 'date': params.get('date'),
+                # 'lat': params.get('lat'),
             }
 
+            # 调用缓存函数
+            result = sixs_inversion.run_inversion_cached(inv_params)
+
+            if result['success']:
+                return {
+                    'success': True,
+                    'rho_toa': params['rho_toa'],
+                    'rho_lsr': result['rho_lsr'],
+                    'rho_retrieved': result['rho_lsr'],
+                    'sza': params['sza'],
+                    'vza': params['vza'],
+                    'raa': params.get('raa', 0.0),
+                    'aod550': params.get('aod550', 0.1),
+                    'h2o': params.get('h2o', 2.0),
+                    'o3': params.get('o3', 0.3),
+                    'wavelength': self.band_wavelength,
+                    'band': params.get('band', '01'),
+                    'station': params.get('station', 'unknown'),
+                    'datetime_utc': params.get('datetime_utc'),
+                    'datetime_bj': params.get('datetime_bj'),
+                    'original_index': params.get('original_index', -1),
+                    'atmos_profile': params.get('atmos_profile', 'Unknown'),
+                    'is_default_merra2': params.get('is_default', False),
+                    'merra2_warning': params.get('merra2_warning', ''),
+                    'from_cache': result.get('from_cache', False),
+                }
+            else:
+                return {
+                    'success': False,
+                    'error': result.get('error', '6S inversion failed'),
+                    **params
+                }
+
         except Exception as e:
-            error_msg = f"6S反演失败: {str(e)}"
             return {
                 'success': False,
-                'error': error_msg,
+                'error': str(e),
                 **params
             }
 

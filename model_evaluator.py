@@ -1,6 +1,6 @@
 # ==================== model_evaluator.py ====================
 """
-模型评估和可视化模块
+模型评估和可视化模块（新框架：目标变量 ΔTOA）
 负责加载已保存的模型进行评估、生成图表和报告
 """
 import numpy as np
@@ -9,7 +9,7 @@ import pickle
 import json
 import matplotlib.pyplot as plt
 from pathlib import Path
-from typing import Dict, Tuple, Any
+from typing import Dict, Tuple, Any, List
 from datetime import datetime
 import warnings
 
@@ -20,7 +20,6 @@ from sklearn.metrics import (mean_squared_error, mean_absolute_error,
 # 高级分析工具
 try:
     import shap
-
     SHAP_AVAILABLE = True
 except ImportError:
     SHAP_AVAILABLE = False
@@ -40,7 +39,7 @@ from data_loader import DataLoader
 
 warnings.filterwarnings('ignore')
 
-# 设置专业科研字体（RSE期刊风格）- 关键修改！
+# 设置专业科研字体（RSE期刊风格）
 plt.rcParams.update({
     'font.family': 'sans-serif',
     'font.sans-serif': ['Arial', 'Helvetica', 'DejaVu Sans'],
@@ -57,7 +56,7 @@ plt.rcParams.update({
     'figure.dpi': 300,
 })
 
-# 自定义颜色映射（与plot2相同风格）
+# 自定义颜色映射
 from matplotlib.colors import LinearSegmentedColormap
 
 ERROR_COLORS = [
@@ -108,7 +107,7 @@ HEXBIN_CMAP = LinearSegmentedColormap.from_list('hexbin_cmap', HEXBIN_COLORS, N=
 
 
 class ModelEvaluator:
-    """模型评估器类"""
+    """模型评估器类（新框架：目标变量为 delta_toa）"""
 
     def __init__(self, saved_dir: Path, config: ExperimentConfig = None,
                  logger=None, use_shap: bool = True):
@@ -118,28 +117,22 @@ class ModelEvaluator:
         self.logger = logger or setup_logger('ModelEvaluator')
         self.use_shap = use_shap and SHAP_AVAILABLE
 
-        # 验证目录结构
         if not self.saved_dir.exists():
             raise ValueError(f"Saved model directory does not exist: {self.saved_dir}")
 
-        # 确定子目录
         self.models_dir = self.saved_dir / "models"
         if not self.models_dir.exists():
-            # 如果models子目录不存在，假设模型直接保存在saved_dir中
             self.models_dir = self.saved_dir
 
-        # 创建输出目录
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         self.output_dir = self.saved_dir / f"evaluation_{timestamp}"
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
-        # 创建子目录
         self.plots_dir = self.output_dir / "plots"
         self.tables_dir = self.output_dir / "tables"
         for d in [self.plots_dir, self.tables_dir]:
             d.mkdir(exist_ok=True)
 
-        # 加载模型和配置
         self.models = self._load_models()
         self.model_info = self._load_model_info()
         self.results = {}
@@ -149,15 +142,11 @@ class ModelEvaluator:
     def _load_models(self) -> Dict[str, Any]:
         """加载所有保存的模型"""
         models = {}
-
-        # 查找所有pkl文件
         model_files = list(self.models_dir.glob("*_model.pkl"))
         if not model_files:
-            # 也查找普通的pkl文件
             model_files = list(self.models_dir.glob("*.pkl"))
 
         for model_file in model_files:
-            # 提取模型名称
             if "_model.pkl" in model_file.name:
                 model_name = model_file.stem.replace("_model", "")
             else:
@@ -185,7 +174,6 @@ class ModelEvaluator:
             except Exception as e:
                 print(f"   Warning: Failed to load model info: {e}")
 
-        # 创建基本的模型信息
         info = {}
         for model_name in self.models.keys():
             info[model_name] = {
@@ -205,19 +193,23 @@ class ModelEvaluator:
                 return artifacts
             except Exception as e:
                 print(f"   Warning: Failed to load training artifacts: {e}")
-
         return None
 
     def prepare_test_data(self, data: pd.DataFrame,
-                          use_feature_engineering: bool = True) -> Tuple[pd.DataFrame, pd.Series]:
-        """准备测试数据（与训练时一致）"""
+                          use_feature_engineering: bool = True,
+                          target_column: str = 'delta_toa') -> Tuple[pd.DataFrame, pd.Series]:
+        """
+        准备测试数据（与训练时一致）
+        参数:
+            data: 测试数据
+            use_feature_engineering: 是否使用特征工程
+            target_column: 目标变量列名（默认 delta_toa）
+        """
         print("=" * 70)
         print("Preparing test data...")
 
-        # 加载训练时的标准化器
         artifacts = self.load_training_artifacts()
 
-        # 创建特征（使用与训练时相同的逻辑）
         from data_loader import AdvancedFeatureEngineering
         feature_engineer = AdvancedFeatureEngineering()
 
@@ -225,32 +217,43 @@ class ModelEvaluator:
             X = feature_engineer.create_features(data)
             print(f"   Feature engineering generated {X.shape[1]} features")
         else:
-            # 使用基础特征
             base_features = ['sza', 'vza', 'raa', 'aod550', 'h2o', 'o3',
                              'wavelength', 'rho_toa']
             X = data[base_features].copy()
-
-            # 添加反演反射率
-            if 'rho_true' in data.columns and 'error_absolute' in data.columns:
-                X['rho_retrieved'] = data['rho_true'] + data['error_absolute']
+            # 若数据中包含 rho_toa_sa，则优先使用
+            if 'rho_toa_sa' in data.columns:
+                X['rho_toa'] = data['rho_toa_sa']
+            elif 'rho_toa' in data.columns:
+                X['rho_toa'] = data['rho_toa']
             else:
-                X['rho_retrieved'] = data.get('rho_true', 0.2)
+                X['rho_toa'] = 0.2
+                print("   Warning: No TOA reflectance column found, using default 0.2")
+
+            # 添加反演反射率（可选，新框架可能不需要）
+            if 'rho_retrieved' in data.columns:
+                X['rho_retrieved'] = data['rho_retrieved']
+            else:
+                X['rho_retrieved'] = 0.0
 
         # 目标变量
-        y = data['error_absolute']
+        if target_column not in data.columns:
+            raise ValueError(f"Target column '{target_column}' not found in data")
+        y = data[target_column]
 
-        # 标准化（使用训练时的标准化器）
         if artifacts and 'scaler' in artifacts:
             scaler = artifacts['scaler']
+            # 确保特征顺序与训练时一致
+            expected_features = artifacts.get('feature_names', X.columns.tolist())
+            X = X[expected_features]  # 重新排序
             X_scaled = scaler.transform(X)
-            X_scaled = pd.DataFrame(X_scaled, columns=X.columns)
-            print(f"   Applied training scaler")
+            X_scaled = pd.DataFrame(X_scaled, columns=expected_features, index=X.index)
+            print(f"   Applied training scaler with {len(expected_features)} features")
         else:
             print(f"   Warning: Training scaler not found, creating new one")
             from sklearn.preprocessing import StandardScaler
             scaler = StandardScaler()
             X_scaled = scaler.fit_transform(X)
-            X_scaled = pd.DataFrame(X_scaled, columns=X.columns)
+            X_scaled = pd.DataFrame(X_scaled, columns=X.columns, index=X.index)
 
         print(f"   Number of features: {X_scaled.shape[1]}")
         print(f"   Number of samples: {X_scaled.shape[0]}")
@@ -267,15 +270,11 @@ class ModelEvaluator:
         for model_name, model in self.models.items():
             try:
                 print(f"   Evaluating {model_name}...")
-
-                # 预测
                 y_pred = model.predict(X_test)
 
-                # 计算指标
                 metrics = self._compute_metrics(y_test, y_pred, model_name)
                 self.results[model_name] = metrics
 
-                # 保存结果
                 result_row = {
                     'Model': model_name,
                     'Description': self.model_info.get(model_name, {}).get('description', f'{model_name} model'),
@@ -290,38 +289,30 @@ class ModelEvaluator:
             except Exception as e:
                 print(f"   {model_name} evaluation failed: {e}")
 
-        # 创建结果DataFrame
         results_df = pd.DataFrame(results)
 
         if not results_df.empty:
-            # 按RMSE排序
             results_df = results_df.sort_values('RMSE')
-
-            # 保存结果
             results_path = self.tables_dir / "evaluation_results.csv"
             results_df.to_csv(results_path, index=False)
 
-            # 打印排名
             print(f"\nModel Performance Ranking:")
             print("-" * 70)
             print(f"{'Rank':<4} {'Model':<15} {'RMSE':<10} {'R²':<8} {'MAE':<10}")
             print("-" * 70)
             for i, (_, row) in enumerate(results_df.iterrows()):
-                print(f"{i + 1:<4} {row['Model']:<15} {row['RMSE']:.6f}  {row['R2']:.4f}  {row['MAE']:.6f}")
+                print(f"{i+1:<4} {row['Model']:<15} {row['RMSE']:.6f}  {row['R2']:.4f}  {row['MAE']:.6f}")
 
         return results_df
 
     def _compute_metrics(self, y_true: pd.Series, y_pred: np.ndarray, model_name: str) -> Dict:
         """计算评估指标"""
         metrics = {}
-
-        # 基础指标
         metrics['RMSE'] = np.sqrt(mean_squared_error(y_true, y_pred))
         metrics['MAE'] = mean_absolute_error(y_true, y_pred)
         metrics['R2'] = r2_score(y_true, y_pred)
         metrics['Explained_Variance'] = explained_variance_score(y_true, y_pred)
 
-        # 相对误差
         nonzero_mask = y_true != 0
         if nonzero_mask.any():
             relative_errors = np.abs((y_true[nonzero_mask] - y_pred[nonzero_mask]) / y_true[nonzero_mask])
@@ -331,16 +322,13 @@ class ModelEvaluator:
             metrics['MAPE'] = np.nan
             metrics['Median_APE'] = np.nan
 
-        # 偏差和精度
         residuals = y_true - y_pred
         metrics['Bias'] = np.mean(residuals)
         metrics['Std_Residuals'] = np.std(residuals)
 
-        # 分位数误差
         metrics['Q10_Error'] = np.percentile(np.abs(residuals), 10)
         metrics['Q90_Error'] = np.percentile(np.abs(residuals), 90)
 
-        # 保存预测值
         metrics['y_true'] = y_true.values.tolist()
         metrics['y_pred'] = y_pred.tolist()
 
@@ -352,58 +340,79 @@ class ModelEvaluator:
         print("=" * 70)
         print("Generating visualizations...")
 
-        # 1. 模型比较图
         self._plot_model_comparison(results_df)
-
-        # 2. 散点图矩阵
         self._plot_scatter_matrix(X_test, y_test)
-
-        # 3. 残差分析图
         self._plot_residual_analysis(X_test, y_test)
-
-        # 4. 预测误差分布图
         self._plot_error_distribution()
-
-        # 5. Hexbin密度图（新增）
         self._plot_hexbin_scatter(X_test, y_test)
-
-        # 6. SHAP分析（如果可用）
         if self.use_shap and self.models:
             self._perform_shap_analysis(X_test)
-
-        # 7. 交互式3D图
         self._plot_interactive_3d()
 
         print(f"All plots saved to: {self.plots_dir}")
 
+    # ==================== 绘图方法 ====================
+
+    def _set_custom_ticks(self, ax, axis_limit):
+        """
+        根据轴范围设置非均匀刻度：
+        - 若 axis_limit > 2.0：内部密集（-2~2 步长0.2），外部稀疏（步长10）
+        - 否则：采用均匀刻度，根据范围自动选择步长
+        """
+        if axis_limit > 2.0:
+            # 内部密集区域（-2 ~ 2）
+            inner_ticks = np.arange(-2.0, 2.01, 0.2)   # 包含 2.0
+            # 左侧稀疏区域（小于 -2 的部分），步长 10
+            left_ticks = np.arange(-axis_limit, -2.0, 10) if -axis_limit < -2.0 else np.array([])
+            # 右侧稀疏区域（大于 2 的部分），步长 10（从 2+10 开始避免重复）
+            right_ticks = np.arange(2.0+10, axis_limit+0.1, 10) if axis_limit > 2.0 else np.array([])
+
+            # 合并所有刻度，并限制在轴范围内
+            all_ticks = np.unique(np.concatenate([left_ticks, inner_ticks, right_ticks]))
+            all_ticks = all_ticks[(all_ticks >= -axis_limit) & (all_ticks <= axis_limit)]
+
+            # 设置主刻度位置
+            ax.set_xticks(all_ticks)
+            ax.set_yticks(all_ticks)
+
+            # 自定义格式化：内部显示一位小数，外部显示整数
+            def tick_formatter(x, pos):
+                if abs(x) < 2.1:   # 容差，覆盖所有内部刻度
+                    return f'{x:.1f}'
+                else:
+                    return f'{x:.0f}'
+            ax.xaxis.set_major_formatter(plt.FuncFormatter(tick_formatter))
+            ax.yaxis.set_major_formatter(plt.FuncFormatter(tick_formatter))
+
+            # 旋转刻度标签避免重叠
+            ax.tick_params(axis='x', rotation=45)
+        else:
+            # 范围较小时，使用均匀刻度
+            if axis_limit <= 0.2:
+                tick_step = 0.05
+            elif axis_limit <= 0.5:
+                tick_step = 0.1
+            else:
+                tick_step = 0.2
+            major_ticks = np.arange(-axis_limit, axis_limit + tick_step/2, tick_step)
+            ax.set_xticks(major_ticks)
+            ax.set_yticks(major_ticks)
+
     def _plot_model_comparison(self, results_df: pd.DataFrame):
-        """绘制模型比较图 - 修复了同一组内柱子颜色相同的问题"""
+        """绘制模型比较图"""
         fig, axes = plt.subplots(2, 3, figsize=(18, 12))
 
-        # 1. RMSE和MAE比较 - 修复颜色问题
+        # 1. RMSE和MAE比较
         ax = axes[0, 0]
         x = np.arange(len(results_df))
         width = 0.35
+        rmse_color = '#1f77b4'
+        mae_color = '#ff7f0e'
 
-        # 为每个指标分配不同颜色
-        rmse_color = '#1f77b4'  # 蓝色
-        mae_color = '#ff7f0e'  # 橙色
-
-        # 绘制柱子
         for i, (_, row) in enumerate(results_df.iterrows()):
-            model_name = row['Model']
-            # 每个模型使用相同的颜色映射
-            model_color = MODEL_COLORS.get(model_name, '#1f77b4')
+            ax.bar(i - width/2, row['RMSE'], width, color=rmse_color, alpha=0.7, edgecolor='black')
+            ax.bar(i + width/2, row['MAE'], width, color=mae_color, alpha=0.7, edgecolor='black')
 
-            # RMSE柱子
-            ax.bar(i - width / 2, row['RMSE'], width,
-                   color=rmse_color, alpha=0.7, edgecolor='black')
-
-            # MAE柱子
-            ax.bar(i + width / 2, row['MAE'], width,
-                   color=mae_color, alpha=0.7, edgecolor='black')
-
-        # 添加图例
         from matplotlib.patches import Patch
         legend_elements = [
             Patch(facecolor=rmse_color, alpha=0.7, edgecolor='black', label='RMSE'),
@@ -417,42 +426,28 @@ class ModelEvaluator:
         ax.set_xticks(x)
         ax.set_xticklabels(results_df['Model'], rotation=45, ha='right', fontsize=8)
         ax.grid(True, alpha=0.2, linestyle='--')
-
         for spine in ['top', 'right']:
             ax.spines[spine].set_visible(False)
-        for spine in ['bottom', 'left']:
-            ax.spines[spine].set_linewidth(0.75)
-            ax.spines[spine].set_color('black')
 
         # 2. R²比较
         ax = axes[0, 1]
-        # 为每个模型使用对应的颜色
         colors = [MODEL_COLORS.get(m, '#1f77b4') for m in results_df['Model']]
-        bars = ax.bar(results_df['Model'], results_df['R2'],
-                      color=colors, alpha=0.8, edgecolor='black')
+        bars = ax.bar(results_df['Model'], results_df['R2'], color=colors, alpha=0.8, edgecolor='black')
         ax.set_xlabel('Model', fontsize=9)
         ax.set_ylabel('R²', fontsize=9)
-        ax.set_title('Model Coefficient of Determination (R²) Comparison',
-                     fontsize=10, fontweight='bold')
+        ax.set_title('Model Coefficient of Determination (R²)', fontsize=10, fontweight='bold')
         ax.set_xticklabels(results_df['Model'], rotation=45, ha='right', fontsize=8)
         ax.grid(True, alpha=0.2, linestyle='--')
-
-        # 添加数值标签
         for bar, value in zip(bars, results_df['R2']):
             height = bar.get_height()
-            ax.text(bar.get_x() + bar.get_width() / 2., height + 0.01,
+            ax.text(bar.get_x() + bar.get_width()/2., height + 0.01,
                     f'{value:.3f}', ha='center', va='bottom', fontsize=8)
-
         for spine in ['top', 'right']:
             ax.spines[spine].set_visible(False)
-        for spine in ['bottom', 'left']:
-            ax.spines[spine].set_linewidth(0.75)
-            ax.spines[spine].set_color('black')
 
         # 3. 预测偏差
         ax = axes[0, 2]
-        ax.bar(results_df['Model'], results_df['Bias'],
-               alpha=0.8, color=colors, edgecolor='black')
+        ax.bar(results_df['Model'], results_df['Bias'], alpha=0.8, color=colors, edgecolor='black')
         ax.axhline(y=0, color='r', linestyle='--', alpha=0.7, linewidth=1.2)
         ax.set_xlabel('Model', fontsize=9)
         ax.set_ylabel('Prediction Bias', fontsize=9)
@@ -461,45 +456,32 @@ class ModelEvaluator:
         ax.grid(True, alpha=0.2, linestyle='--')
         for spine in ['top', 'right']:
             ax.spines[spine].set_visible(False)
-        for spine in ['bottom', 'left']:
-            ax.spines[spine].set_linewidth(0.75)
-            ax.spines[spine].set_color('black')
 
         # 4. MAPE比较
         ax = axes[1, 0]
-        ax.bar(results_df['Model'], results_df['MAPE'],
-               alpha=0.8, color=colors, edgecolor='black')
+        ax.bar(results_df['Model'], results_df['MAPE'], alpha=0.8, color=colors, edgecolor='black')
         ax.set_xlabel('Model', fontsize=9)
         ax.set_ylabel('MAPE (%)', fontsize=9)
-        ax.set_title('Mean Absolute Percentage Error (MAPE)',
-                     fontsize=10, fontweight='bold')
+        ax.set_title('Mean Absolute Percentage Error (MAPE)', fontsize=10, fontweight='bold')
         ax.set_xticklabels(results_df['Model'], rotation=45, ha='right', fontsize=8)
         ax.grid(True, alpha=0.2, linestyle='--')
         for spine in ['top', 'right']:
             ax.spines[spine].set_visible(False)
-        for spine in ['bottom', 'left']:
-            ax.spines[spine].set_linewidth(0.75)
-            ax.spines[spine].set_color('black')
 
         # 5. 解释方差
         ax = axes[1, 1]
-        ax.bar(results_df['Model'], results_df['Explained_Variance'],
-               alpha=0.8, color=colors, edgecolor='black')
+        ax.bar(results_df['Model'], results_df['Explained_Variance'], alpha=0.8, color=colors, edgecolor='black')
         ax.set_xlabel('Model', fontsize=9)
         ax.set_ylabel('Explained Variance', fontsize=9)
-        ax.set_title('Model Explained Variance', fontsize=10, fontweight='bold')
+        ax.set_title('Explained Variance', fontsize=10, fontweight='bold')
         ax.set_xticklabels(results_df['Model'], rotation=45, ha='right', fontsize=8)
         ax.grid(True, alpha=0.2, linestyle='--')
         for spine in ['top', 'right']:
             ax.spines[spine].set_visible(False)
-        for spine in ['bottom', 'left']:
-            ax.spines[spine].set_linewidth(0.75)
-            ax.spines[spine].set_color('black')
 
         # 6. 标准差
         ax = axes[1, 2]
-        ax.bar(results_df['Model'], results_df['Std_Residuals'],
-               alpha=0.8, color=colors, edgecolor='black')
+        ax.bar(results_df['Model'], results_df['Std_Residuals'], alpha=0.8, color=colors, edgecolor='black')
         ax.set_xlabel('Model', fontsize=9)
         ax.set_ylabel('Std of Residuals', fontsize=9)
         ax.set_title('Standard Deviation of Residuals', fontsize=10, fontweight='bold')
@@ -507,9 +489,6 @@ class ModelEvaluator:
         ax.grid(True, alpha=0.2, linestyle='--')
         for spine in ['top', 'right']:
             ax.spines[spine].set_visible(False)
-        for spine in ['bottom', 'left']:
-            ax.spines[spine].set_linewidth(0.75)
-            ax.spines[spine].set_color('black')
 
         plt.tight_layout()
         plt.savefig(self.plots_dir / "model_comparison.png", dpi=600, bbox_inches='tight',
@@ -531,24 +510,28 @@ class ModelEvaluator:
             ax = axes[idx]
             y_pred = model.predict(X_test)
 
-            # 散点图 - 使用颜色映射显示误差
+            # 计算对称的轴范围
+            data_min = min(y_test.min(), y_pred.min())
+            data_max = max(y_test.max(), y_pred.max())
+            data_range = max(abs(data_min), abs(data_max))
+            axis_limit = max(0.10, np.ceil(data_range * 10) / 10)  # 确保至少0.1
+            ax.set_xlim(-axis_limit, axis_limit)
+            ax.set_ylim(-axis_limit, axis_limit)
+            ax.set_aspect('equal')
+
             abs_errors = np.abs(y_test - y_pred)
             scatter = ax.scatter(y_test, y_pred, alpha=0.6, s=10,
                                  c=abs_errors, cmap=SCATTER_CMAP, edgecolors='none')
 
-            # 对角线
-            min_val = min(y_test.min(), y_pred.min())
-            max_val = max(y_test.max(), y_pred.max())
-            ax.plot([min_val, max_val], [min_val, max_val], 'r--', lw=1.5, alpha=0.8)
+            # 1:1线
+            ax.plot([-axis_limit, axis_limit], [-axis_limit, axis_limit], 'r--', lw=1.5, alpha=0.8)
 
-            # 统计信息
             rmse = np.sqrt(mean_squared_error(y_test, y_pred))
             r2 = r2_score(y_test, y_pred)
             mae = mean_absolute_error(y_test, y_pred)
 
             ax.text(0.05, 0.95, f'RMSE = {rmse:.4f}\nR² = {r2:.3f}\nMAE = {mae:.4f}',
-                    transform=ax.transAxes, fontsize=8,
-                    verticalalignment='top',
+                    transform=ax.transAxes, fontsize=8, verticalalignment='top',
                     bbox=dict(boxstyle='round', facecolor='white', alpha=0.8,
                               edgecolor='gray', linewidth=0.5))
 
@@ -556,24 +539,18 @@ class ModelEvaluator:
             ax.set_ylabel('Predicted Value', fontsize=9)
             ax.set_title(f'{model_name} - Prediction vs True', fontsize=10, fontweight='bold')
             ax.grid(True, alpha=0.2, linestyle='--')
-
-            # 设置坐标轴边框
             for spine in ['top', 'right']:
                 ax.spines[spine].set_visible(False)
-            for spine in ['bottom', 'left']:
-                ax.spines[spine].set_linewidth(0.75)
-                ax.spines[spine].set_color('black')
+            ax.tick_params(axis='both', which='both', length=4, width=0.75, direction='out', labelsize=8)
 
-            ax.tick_params(axis='both', which='both', length=4, width=0.75,
-                           direction='out', labelsize=8)
+            # 应用自定义刻度
+            self._set_custom_ticks(ax, axis_limit)
 
-            # 添加颜色条
             if idx == 0:
                 cbar = plt.colorbar(scatter, ax=ax, shrink=0.8)
                 cbar.set_label('Absolute Error', fontsize=8)
                 cbar.ax.tick_params(labelsize=7)
 
-        # 隐藏多余的子图
         for idx in range(len(self.models), len(axes)):
             axes[idx].set_visible(False)
 
@@ -586,14 +563,12 @@ class ModelEvaluator:
         """绘制专业的Hexbin散点图 - 科研红蓝配色版"""
         print("   Generating professional hexbin scatter plots...")
 
-        # 1. 先计算所有模型的R²值，并按R²从大到小排序
         model_performance = []
         for model_name, model in self.models.items():
             y_pred = model.predict(X_test)
             r2 = r2_score(y_test, y_pred)
             model_performance.append((model_name, model, r2, y_pred))
 
-        # 按R²从大到小排序
         model_performance.sort(key=lambda x: x[2], reverse=True)
 
         n_models = len(model_performance)
@@ -605,137 +580,79 @@ class ModelEvaluator:
             axes = np.array([axes])
         axes = axes.flatten()
 
-        # 定义科研红蓝配色
-        # 使用seaborn的diverging红蓝配色方案
         try:
             import seaborn as sns
-            # 使用seaborn的diverging红蓝配色
-            red_blue_cmap = sns.diverging_palette(240, 10, as_cmap=True)  # 从蓝色到红色
+            red_blue_cmap = sns.diverging_palette(240, 10, as_cmap=True)
             print("   Using seaborn red-blue diverging color palette")
         except ImportError:
-            # 如果seaborn不可用，使用matplotlib的RdBu_r
             red_blue_cmap = plt.cm.RdBu_r
             print("   Using matplotlib RdBu_r color palette")
 
         for idx, (model_name, model, r2_value, y_pred) in enumerate(model_performance[:len(axes)]):
             ax = axes[idx]
 
-            # 计算残差（预测值 - 真实值）
             residuals = y_pred - y_test
-
-            # 1. 计算数据范围，但保持对称
             data_min = min(y_test.min(), y_pred.min())
             data_max = max(y_test.max(), y_pred.max())
             data_range = max(abs(data_min), abs(data_max))
-
-            # 设置坐标轴范围，保持对称
-            axis_limit = max(0.10, np.ceil(data_range * 10) / 10)  # 至少0.10，向上取整到0.1
+            axis_limit = max(0.10, np.ceil(data_range * 10) / 10)
             ax.set_xlim(-axis_limit, axis_limit)
             ax.set_ylim(-axis_limit, axis_limit)
-
-            # 确保1:1等比例显示
             ax.set_aspect('equal')
 
-            # 2. 计算统计指标
             n_samples = len(y_test)
             rmse = np.sqrt(mean_squared_error(y_test, y_pred))
             mae = mean_absolute_error(y_test, y_pred)
 
-            # 3. 绘制Hexbin散点热力图
-            # 使用科研红蓝配色，蓝色表示低密度，红色表示高密度
             hexbin = ax.hexbin(y_test, y_pred, gridsize=60, cmap=red_blue_cmap,
-                               mincnt=1, edgecolors='none', alpha=0.9,
-                               zorder=4)
+                               mincnt=1, edgecolors='none', alpha=0.9, zorder=4)
 
-            # 获取hexbin的计数值用于设置colorbar
             counts = hexbin.get_array()
 
-            # 4. 绘制参考线
-            # 1:1参考线（黑色实线）
             x_range = np.array([-axis_limit, axis_limit])
-            ax.plot(x_range, x_range, 'k-', linewidth=1.5,
-                    label='1:1 Line', zorder=5)
+            ax.plot(x_range, x_range, 'k-', linewidth=1.5, label='1:1 Line', zorder=5)
 
-            # 线性回归拟合线（黑色虚线）
             if len(y_test) > 1:
-                # 计算线性回归
                 slope, intercept, r_value, p_value, std_err = stats.linregress(y_test, y_pred)
                 fit_line = slope * x_range + intercept
                 ax.plot(x_range, fit_line, 'k--', linewidth=1.5,
                         label=f'Fit (slope={slope:.3f})', zorder=6)
 
-            # 5. 添加坐标轴标签
             ax.set_xlabel('True Value', fontsize=11, fontweight='bold')
             ax.set_ylabel('Predicted Value', fontsize=11, fontweight='bold')
-
-            # 6. 添加标题和统计信息
             ax.set_title(f'{model_name} (R²={r2_value:.3f})\nn={n_samples:,}, RMSE={rmse:.4f}, MAE={mae:.4f}',
                          fontsize=12, fontweight='bold', pad=12)
-
-            # 7. 添加网格线（更细更淡）
             ax.grid(True, alpha=0.15, linestyle='-', linewidth=0.5, zorder=0)
-
-            # 8. 设置坐标轴边框
             for spine in ax.spines.values():
                 spine.set_linewidth(1.0)
                 spine.set_color('black')
+            ax.tick_params(axis='both', which='major', length=6, width=0.8, direction='out', labelsize=9)
+            ax.tick_params(axis='both', which='minor', length=3, width=0.5, direction='out', labelsize=7)
 
-            # 9. 设置刻度
-            ax.tick_params(axis='both', which='major', length=6, width=0.8,
-                           direction='out', labelsize=9)
-            ax.tick_params(axis='both', which='minor', length=3, width=0.5,
-                           direction='out', labelsize=7)
+            # 应用自定义刻度
+            self._set_custom_ticks(ax, axis_limit)
 
-            # 设置主要刻度，基于轴限制自动调整
-            # 自动计算合适的刻度间隔
-            if axis_limit <= 0.2:
-                tick_step = 0.05
-            elif axis_limit <= 0.5:
-                tick_step = 0.1
-            else:
-                tick_step = 0.2
-
-            major_ticks = np.arange(-axis_limit, axis_limit + tick_step / 2, tick_step)
-            ax.set_xticks(major_ticks)
-            ax.set_yticks(major_ticks)
-
-            # 设置次要刻度
-            minor_ticks = np.arange(-axis_limit, axis_limit + tick_step / 4, tick_step / 2)
-            ax.set_xticks(minor_ticks, minor=True)
-            ax.set_yticks(minor_ticks, minor=True)
-
-            # 10. 添加图例（只有1:1线和拟合线）
             handles, labels = ax.get_legend_handles_labels()
             if handles:
-                ax.legend(handles=handles, labels=labels,
-                          fontsize=9, frameon=True,
-                          framealpha=0.9, edgecolor='black',
-                          loc='upper left', bbox_to_anchor=(0.02, 0.98),
-                          borderaxespad=0.5, ncol=1)
+                ax.legend(handles=handles, labels=labels, fontsize=9, frameon=True,
+                          framealpha=0.9, edgecolor='black', loc='upper left',
+                          bbox_to_anchor=(0.02, 0.98), borderaxespad=0.5, ncol=1)
 
-            # 11. 添加颜色条（右侧）- 修复版
             if counts is not None and len(counts) > 0:
-                # 计算log10计数
                 log_counts = np.log10(counts)
                 min_log = np.min(log_counts)
                 max_log = np.max(log_counts)
 
-                # 创建新的ScalarMappable，使用log10值
                 from matplotlib.cm import ScalarMappable
                 from matplotlib.colors import Normalize
-
-                # 使用与hexbin相同的颜色映射
                 norm = Normalize(vmin=min_log, vmax=max_log)
                 sm = ScalarMappable(cmap=red_blue_cmap, norm=norm)
                 sm.set_array([])
 
-                # 创建颜色条
                 cbar = plt.colorbar(sm, ax=ax, shrink=0.8, pad=0.03)
                 cbar.set_label('log₁₀(Count)', fontsize=10, fontweight='bold')
                 cbar.ax.tick_params(labelsize=8)
 
-                # 设置更顺畅的刻度
-                # 计算合理的刻度间隔
                 log_range = max_log - min_log
                 if log_range <= 1.0:
                     tick_step = 0.2
@@ -743,18 +660,13 @@ class ModelEvaluator:
                     tick_step = 0.5
                 else:
                     tick_step = 1.0
-
-                # 生成刻度
                 start_tick = np.floor(min_log / tick_step) * tick_step
                 end_tick = np.ceil(max_log / tick_step) * tick_step
-                ticks = np.arange(start_tick, end_tick + tick_step / 2, tick_step)
-
-                # 过滤掉超出范围的刻度
+                ticks = np.arange(start_tick, end_tick + tick_step/2, tick_step)
                 ticks = ticks[(ticks >= min_log - 0.1) & (ticks <= max_log + 0.1)]
 
                 if len(ticks) >= 2:
                     cbar.set_ticks(ticks)
-                    # 格式化刻度标签
                     tick_labels = []
                     for tick in ticks:
                         if tick.is_integer():
@@ -765,7 +677,6 @@ class ModelEvaluator:
                             tick_labels.append(f'{tick:.2f}')
                     cbar.set_ticklabels(tick_labels)
                 else:
-                    # 如果刻度太少，使用默认的5个等间距刻度
                     n_ticks = min(5, int(log_range * 2) + 1)
                     if n_ticks >= 2:
                         ticks = np.linspace(min_log, max_log, n_ticks)
@@ -773,23 +684,20 @@ class ModelEvaluator:
                         tick_labels = [f'{tick:.1f}' for tick in ticks]
                         cbar.set_ticklabels(tick_labels)
 
-        # 隐藏多余的子图
         for idx in range(len(model_performance), len(axes)):
             axes[idx].set_visible(False)
 
         plt.tight_layout()
         plt.savefig(self.plots_dir / "hexbin_density_plots_red_blue.png",
-                    dpi=600, bbox_inches='tight',
-                    facecolor='white', edgecolor='none')
+                    dpi=600, bbox_inches='tight', facecolor='white', edgecolor='none')
         plt.close()
-        print("   Professional hexbin plots with red-blue color scheme saved successfully")
+        print("   Professional hexbin plots saved successfully")
 
     def _plot_residual_analysis(self, X_test: pd.DataFrame, y_test: pd.Series):
         """绘制残差分析图"""
         if not self.results:
             return
 
-        # 获取最佳模型
         best_model_name = list(self.results.keys())[0]
         model = self.models[best_model_name]
         y_pred = model.predict(X_test)
@@ -808,9 +716,6 @@ class ModelEvaluator:
         ax.grid(True, alpha=0.2, linestyle='--')
         for spine in ['top', 'right']:
             ax.spines[spine].set_visible(False)
-        for spine in ['bottom', 'left']:
-            ax.spines[spine].set_linewidth(0.75)
-            ax.spines[spine].set_color('black')
 
         # 2. 残差vs预测值
         ax = axes[0, 1]
@@ -821,17 +726,10 @@ class ModelEvaluator:
         ax.set_ylabel('Residual', fontsize=9)
         ax.set_title('Residuals vs Predicted Values', fontsize=10, fontweight='bold')
         ax.grid(True, alpha=0.2, linestyle='--')
-
-        # 添加颜色条
         cbar = plt.colorbar(scatter, ax=ax, shrink=0.8)
         cbar.set_label('|Residual|', fontsize=8)
-        cbar.ax.tick_params(labelsize=7)
-
         for spine in ['top', 'right']:
             ax.spines[spine].set_visible(False)
-        for spine in ['bottom', 'left']:
-            ax.spines[spine].set_linewidth(0.75)
-            ax.spines[spine].set_color('black')
 
         # 3. QQ图
         ax = axes[0, 2]
@@ -842,9 +740,6 @@ class ModelEvaluator:
         ax.set_ylabel('Sample Quantiles', fontsize=9)
         for spine in ['top', 'right']:
             ax.spines[spine].set_visible(False)
-        for spine in ['bottom', 'left']:
-            ax.spines[spine].set_linewidth(0.75)
-            ax.spines[spine].set_color('black')
 
         # 4. 累计残差
         ax = axes[1, 0]
@@ -856,9 +751,6 @@ class ModelEvaluator:
         ax.grid(True, alpha=0.2, linestyle='--')
         for spine in ['top', 'right']:
             ax.spines[spine].set_visible(False)
-        for spine in ['bottom', 'left']:
-            ax.spines[spine].set_linewidth(0.75)
-            ax.spines[spine].set_color('black')
 
         # 5. 误差vs目标值
         ax = axes[1, 1]
@@ -870,9 +762,6 @@ class ModelEvaluator:
         ax.grid(True, alpha=0.2, linestyle='--')
         for spine in ['top', 'right']:
             ax.spines[spine].set_visible(False)
-        for spine in ['bottom', 'left']:
-            ax.spines[spine].set_linewidth(0.75)
-            ax.spines[spine].set_color('black')
 
         # 6. 残差自相关
         ax = axes[1, 2]
@@ -881,11 +770,7 @@ class ModelEvaluator:
         ax.grid(True, alpha=0.2, linestyle='--')
         for spine in ['top', 'right']:
             ax.spines[spine].set_visible(False)
-        for spine in ['bottom', 'left']:
-            ax.spines[spine].set_linewidth(0.75)
-            ax.spines[spine].set_color('black')
 
-        # 设置所有子图的刻度标签大小
         for ax in axes.flatten():
             ax.tick_params(axis='both', which='both', labelsize=8)
 
@@ -915,11 +800,9 @@ class ModelEvaluator:
             y_pred = np.array(metrics['y_pred'])
             errors = y_true - y_pred
 
-            # 误差直方图
             ax.hist(errors, bins=50, alpha=0.7, density=True, edgecolor='black',
                     color=MODEL_COLORS.get(model_name, '#1f77b4'))
 
-            # 拟合正态分布
             mu, sigma = stats.norm.fit(errors)
             x = np.linspace(errors.min(), errors.max(), 100)
             p = stats.norm.pdf(x, mu, sigma)
@@ -931,17 +814,10 @@ class ModelEvaluator:
             ax.set_title(f'{model_name} - Error Distribution', fontsize=10, fontweight='bold')
             ax.legend(fontsize=8, frameon=False)
             ax.grid(True, alpha=0.2, linestyle='--')
-
             for spine in ['top', 'right']:
                 ax.spines[spine].set_visible(False)
-            for spine in ['bottom', 'left']:
-                ax.spines[spine].set_linewidth(0.75)
-                ax.spines[spine].set_color('black')
+            ax.tick_params(axis='both', which='both', length=4, width=0.75, direction='out', labelsize=8)
 
-            ax.tick_params(axis='both', which='both', length=4, width=0.75,
-                           direction='out', labelsize=8)
-
-        # 隐藏多余的子图
         for idx in range(len(self.results), len(axes)):
             axes[idx].set_visible(False)
 
@@ -951,77 +827,66 @@ class ModelEvaluator:
         plt.close()
 
     def _perform_shap_analysis(self, X_test: pd.DataFrame):
-        """执行SHAP分析 - 添加包含所有特征的版本"""
+        """执行SHAP分析"""
         if not self.models:
             return
 
         print("   Performing SHAP analysis...")
 
-        # 选择最佳模型进行SHAP分析
         best_model_name = list(self.results.keys())[0]
         model = self.models[best_model_name]
 
-        # 采样以减少计算时间
         if len(X_test) > 1000:
             X_sample = X_test.sample(n=min(500, len(X_test)), random_state=self.config.RANDOM_SEED)
         else:
             X_sample = X_test
 
         try:
-            # 创建SHAP解释器
-            if best_model_name in ['RandomForest', 'GradientBoosting', 'ExtraTrees']:
-                explainer = shap.TreeExplainer(model)
-                shap_values = explainer.shap_values(X_sample)
-            elif best_model_name in ['XGBoost', 'LightGBM']:
+            if best_model_name in ['RandomForest', 'GradientBoosting', 'ExtraTrees', 'XGBoost', 'LightGBM']:
                 explainer = shap.TreeExplainer(model)
                 shap_values = explainer.shap_values(X_sample)
             else:
-                # 对于其他模型，使用KernelExplainer
                 explainer = shap.KernelExplainer(model.predict, X_sample[:100])
                 shap_values = explainer.shap_values(X_sample)
 
-            # 1. 特征重要性摘要图（默认显示前20个特征）
+            # 摘要图（Top 20）
             plt.figure(figsize=(10, 8))
             shap.summary_plot(shap_values, X_sample, show=False, max_display=20)
-            plt.title(f'{best_model_name} - SHAP Feature Importance (Top 20)',
-                      fontsize=11, fontweight='bold')
+            plt.title(f'{best_model_name} - SHAP Feature Importance (Top 20)', fontsize=11, fontweight='bold')
             plt.tight_layout()
             plt.savefig(self.plots_dir / f"{best_model_name}_shap_summary_top20.png",
                         dpi=600, bbox_inches='tight', facecolor='white', edgecolor='none')
             plt.close()
 
-            # 2. 特征重要性摘要图（显示所有特征）
+            # 摘要图（所有特征）
             plt.figure(figsize=(12, 10))
             shap.summary_plot(shap_values, X_sample, show=False, max_display=min(50, X_sample.shape[1]))
-            plt.title(f'{best_model_name} - SHAP Feature Importance (All Features)',
-                      fontsize=11, fontweight='bold')
+            plt.title(f'{best_model_name} - SHAP Feature Importance (All Features)', fontsize=11, fontweight='bold')
             plt.tight_layout()
             plt.savefig(self.plots_dir / f"{best_model_name}_shap_summary_all.png",
                         dpi=600, bbox_inches='tight', facecolor='white', edgecolor='none')
             plt.close()
 
-            # 3. 条形图（默认显示前20个特征）
+            # 条形图（Top 20）
             plt.figure(figsize=(10, 6))
             shap.summary_plot(shap_values, X_sample, plot_type="bar", show=False, max_display=20)
-            plt.title(f'{best_model_name} - SHAP Feature Importance (Bar Plot - Top 20)',
-                      fontsize=11, fontweight='bold')
+            plt.title(f'{best_model_name} - SHAP Feature Importance (Bar - Top 20)', fontsize=11, fontweight='bold')
             plt.tight_layout()
             plt.savefig(self.plots_dir / f"{best_model_name}_shap_bar_top20.png",
                         dpi=600, bbox_inches='tight', facecolor='white', edgecolor='none')
             plt.close()
 
-            # 4. 条形图（显示所有特征）
+            # 条形图（所有特征）
             plt.figure(figsize=(12, 8))
             shap.summary_plot(shap_values, X_sample, plot_type="bar", show=False,
                               max_display=min(50, X_sample.shape[1]))
-            plt.title(f'{best_model_name} - SHAP Feature Importance (Bar Plot - All Features)',
-                      fontsize=11, fontweight='bold')
+            plt.title(f'{best_model_name} - SHAP Feature Importance (Bar - All Features)', fontsize=11, fontweight='bold')
             plt.tight_layout()
             plt.savefig(self.plots_dir / f"{best_model_name}_shap_bar_all.png",
                         dpi=600, bbox_inches='tight', facecolor='white', edgecolor='none')
             plt.close()
 
-            print("   SHAP analysis completed with both top 20 and all features plots")
+            print("   SHAP analysis completed with all plots")
 
         except Exception as e:
             print(f"   SHAP analysis failed: {e}")
@@ -1029,16 +894,11 @@ class ModelEvaluator:
     def _plot_interactive_3d(self):
         """绘制交互式3D图"""
         try:
-            import plotly.offline as pyo
-
-            # 创建3D散点图
             if self.results:
                 best_model_name = list(self.results.keys())[0]
                 metrics = self.results[best_model_name]
 
                 fig = go.Figure()
-
-                # 添加预测vs实际散点
                 fig.add_trace(go.Scatter3d(
                     x=metrics['y_true'],
                     y=metrics['y_pred'],
@@ -1054,7 +914,6 @@ class ModelEvaluator:
                     name='Predicted points'
                 ))
 
-                # 添加理想预测平面
                 x_range = np.linspace(min(metrics['y_true']), max(metrics['y_true']), 10)
                 y_range = np.linspace(min(metrics['y_pred']), max(metrics['y_pred']), 10)
                 X, Y = np.meshgrid(x_range, y_range)
@@ -1079,10 +938,8 @@ class ModelEvaluator:
                     height=700
                 )
 
-                # 保存为HTML文件
                 plot_path = self.plots_dir / f"{best_model_name}_3d_visualization.html"
                 fig.write_html(str(plot_path))
-
                 print(f"   3D interactive plot saved: {plot_path}")
 
         except Exception as e:
@@ -1112,12 +969,10 @@ class ModelEvaluator:
             }
         }
 
-        # 保存JSON报告
         report_path = self.output_dir / "evaluation_summary.json"
         with open(report_path, 'w', encoding='utf-8') as f:
             json.dump(report, f, indent=2, ensure_ascii=False)
 
-        # 生成文本报告
         text_report = self._generate_text_report(results_df)
         text_path = self.output_dir / "evaluation_report.txt"
         with open(text_path, 'w', encoding='utf-8') as f:
@@ -1145,7 +1000,7 @@ class ModelEvaluator:
         report_lines.append("-" * 80)
 
         for i, (_, row) in enumerate(results_df.iterrows()):
-            report_lines.append(f"{i + 1:<4} {row['Model']:<15} {row['RMSE']:<12.6f} "
+            report_lines.append(f"{i+1:<4} {row['Model']:<15} {row['RMSE']:<12.6f} "
                                 f"{row['R2']:<10.4f} {row['MAE']:<12.6f}")
 
         report_lines.append("")
@@ -1175,7 +1030,7 @@ def evaluate_main():
     """评估主函数"""
     import argparse
 
-    parser = argparse.ArgumentParser(description='Machine Learning Model Evaluation System')
+    parser = argparse.ArgumentParser(description='Machine Learning Model Evaluation System (ΔTOA)')
     parser.add_argument('--saved_dir', type=str, required=True,
                         help='Directory path of saved models')
     parser.add_argument('--sample', type=float, default=0.3,
@@ -1190,7 +1045,7 @@ def evaluate_main():
     args = parser.parse_args()
 
     print("\n" + "=" * 80)
-    print("Machine Learning Model Evaluation System")
+    print("Machine Learning Model Evaluation System (Target: ΔTOA)")
     print("=" * 80)
     print(f"Start Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print(f"Model Directory: {args.saved_dir}")
@@ -1200,35 +1055,29 @@ def evaluate_main():
     print("=" * 80)
 
     try:
-        # 修改配置的数据目录（如果需要）
         config = ExperimentConfig
         if args.data_dir:
             config.DATA_DIR = Path(args.data_dir)
 
-        # 创建模型评估器
         evaluator = ModelEvaluator(
             saved_dir=Path(args.saved_dir),
             config=config,
             use_shap=not args.no_shap
         )
 
-        # 加载测试数据
         dl = DataLoader(config=config)
-        test_data = dl.load_data(sample_fraction=args.sample)
+        test_data = dl.load_data(sample_fraction=args.sample,
+                                 filter_extreme_delta=True,
+                                 delta_threshold=0.5)
 
-        # 准备特征
         X_test, y_test = evaluator.prepare_test_data(
             test_data,
-            use_feature_engineering=not args.no_feature_engineering
+            use_feature_engineering=not args.no_feature_engineering,
+            target_column='delta_toa'
         )
 
-        # 评估模型
         results_df = evaluator.evaluate_models(X_test, y_test)
-
-        # 生成可视化
         evaluator.generate_all_visualizations(X_test, y_test, results_df)
-
-        # 生成报告
         evaluator.generate_report(results_df)
 
         print("\n" + "=" * 80)
@@ -1242,7 +1091,7 @@ def evaluate_main():
             print(f"{'Rank':<4} {'Model':<15} {'RMSE':<12} {'R²':<10} {'MAE':<12}")
             print("-" * 80)
             for i, (_, row) in enumerate(results_df.iterrows()):
-                print(f"{i + 1:<4} {row['Model']:<15} {row['RMSE']:<12.6f} "
+                print(f"{i+1:<4} {row['Model']:<15} {row['RMSE']:<12.6f} "
                       f"{row['R2']:<10.4f} {row['MAE']:<12.6f}")
 
         print("\nGenerated Files:")

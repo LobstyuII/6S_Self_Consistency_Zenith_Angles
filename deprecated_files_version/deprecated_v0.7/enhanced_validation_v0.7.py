@@ -111,7 +111,7 @@ class EnhancedValidatorV0_7:
             if not loaded:
                 # 尝试在常见位置搜索
                 search_dirs = [
-                    Path(".."),
+                    Path("../.."),
                     Path("./models"),
                     Path("D:/6S_Self_Consistency_Zenith_Angles_v0.4/models"),
                     Path("D:/6S_Self_Consistency_Zenith_Angles_v0.4/models/refactored")
@@ -274,7 +274,7 @@ class EnhancedValidatorV0_7:
                 lsr_path = cache_path
             else:
                 # 查找任何包含日期的文件
-                possible_files = list(Path("..").glob("*lsr*.parquet"))
+                possible_files = list(Path("../..").glob("*lsr*.parquet"))
                 if possible_files:
                     lsr_path = possible_files[0]
                     print(f"Found alternative file: {lsr_path}")
