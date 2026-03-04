@@ -1,0 +1,33 @@
+# 1. 下载 GEE 产品（MCD43A1, MCD12Q1, SRTM）
+python Himawari_POI_Selection/download_gee_products.py --gee_key D:\Users\lobst\PycharmProjects\6S_Self_Consistency_Zenith_Angles\premium-cipher-424203-d0-18b67488cea9.json --start_date 2016-05-01 --end_date 2016-05-08 --drive_folder my_validation_data
+
+# 2. 从 JAXA FTP 下载 Himawari AHI L1 和 L2 数据
+python Himawari_POI_Selection/download_ahi_full.py --start_date 20160501 --end_date 20160507 --output_dir D:\Users\lobst\PycharmProjects\6S_Self_Consistency_Zenith_Angles\Himawari_POI_Selection\AHI_data
+
+# 3. 从任意一个 L1 文件提取 AHI 角度场（卫星天顶角、方位角、经纬度）
+python Himawari_POI_Selection/extract_ahi_angles.py --l1_file D:\Users\lobst\PycharmProjects\6S_Self_Consistency_Zenith_Angles\Himawari_POI_Selection\AHI_data\H8L1_10min\2016\05\H8_20160501_0000.nc --output D:\Users\lobst\PycharmProjects\6S_Self_Consistency_Zenith_Angles\Himawari_POI_Selection\AHI_data\poi_output\ahi_angles_5km.nc
+
+# 4. 扫描 L2 ARP 文件，统计晴空陆地有效观测次数，选出候选点（前10%）
+python select_top_pixels.py \
+    --l2_dir /path/to/your/data/H8L2ARP_10min \
+    --angle_file /path/to/your/data/poi_output/ahi_angles_5km.nc \
+    --start_date 2016-05-01 \
+    --end_date 2016-05-08 \
+    --top_percent 10 \
+    --qa_var QA_flag \
+    --output_csv /path/to/your/data/poi_output/candidates.csv \
+    --output_nc /path/to/your/data/poi_output/candidates.nc
+
+
+
+
+
+
+python Himawari_POI_Selection/run_pipeline.py --l1_example /path/to/ahi_l1_example.nc --gee_key D:\Users\lobst\PycharmProjects\6S_Self_Consistency_Zenith_Angles\premium-cipher-424203-d0-18b67488cea9.json --modis_dir ./MCD43A1 --lc_file ./MCD12Q1/MCD12Q1_2016_LC_Type1.nc --dem_file ./SRTM/SRTM_DEM.nc --merra2_dir ./MERRA2_10min/combined
+
+
+
+
+
+
+

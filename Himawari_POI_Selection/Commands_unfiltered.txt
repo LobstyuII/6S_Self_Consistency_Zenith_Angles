@@ -1,0 +1,84 @@
+# ==============================================================================
+# Himawari POI 选择流程（PowerShell 版本）
+# 根目录: D:\Users\lobst\PycharmProjects\6S_Self_Consistency_Zenith_Angles
+# 脚本存放: Himawari_POI_Selection\
+# ==============================================================================
+
+# -------------------- 步骤 1: 下载 GEE 产品 --------------------
+python Himawari_POI_Selection/download_gee_products.py `
+    --gee_key "D:\Users\lobst\PycharmProjects\6S_Self_Consistency_Zenith_Angles\premium-cipher-424203-d0-18b67488cea9.json" `
+    --start_date 2016-05-01 `
+    --end_date 2016-05-08 `
+    --drive_folder my_validation_data
+
+# -------------------- 步骤 2: 下载 Himawari AHI L1/L2 数据 --------------------
+python Himawari_POI_Selection/download_ahi_full.py `
+    --start_date 20160501 `
+    --end_date 20160507 `
+    --output_dir "D:\Users\lobst\PycharmProjects\6S_Self_Consistency_Zenith_Angles\Himawari_POI_Selection\AHI_data"
+
+# -------------------- 步骤 3: 提取 AHI 角度场 --------------------
+python Himawari_POI_Selection/extract_ahi_angles.py `
+    --l1_file "D:\Users\lobst\PycharmProjects\6S_Self_Consistency_Zenith_Angles\Himawari_POI_Selection\AHI_data\H8L1_10min\2016\05\H8_20160501_0000.nc" `
+    --output "D:\Users\lobst\PycharmProjects\6S_Self_Consistency_Zenith_Angles\Himawari_POI_Selection\AHI_data\poi_output\ahi_angles_5km.nc"
+
+# -------------------- 步骤 4: 统计晴空陆地有效观测次数，选出候选点 --------------------
+python Himawari_POI_Selection/select_top_pixels.py `
+    --l2_dir "D:\Users\lobst\PycharmProjects\6S_Self_Consistency_Zenith_Angles\Himawari_POI_Selection\AHI_data\H8L2ARP_10min" `
+    --angle_file "D:\Users\lobst\PycharmProjects\6S_Self_Consistency_Zenith_Angles\Himawari_POI_Selection\AHI_data\poi_output\ahi_angles_5km.nc" `
+    --start_date 2016-05-01 `
+    --end_date 2016-05-08 `
+    --top_percent 10 `
+    --qa_var QA_flag `
+    --output_csv "D:\Users\lobst\PycharmProjects\6S_Self_Consistency_Zenith_Angles\Himawari_POI_Selection\AHI_data\poi_output\candidates.csv" `
+    --output_nc "D:\Users\lobst\PycharmProjects\6S_Self_Consistency_Zenith_Angles\Himawari_POI_Selection\AHI_data\poi_output\candidates.nc"
+
+# -------------------- 步骤 5a: 将本地 MCD43A1 数据聚合到 AHI 网格 --------------------
+python Himawari_POI_Selection/prepare_local_brdf.py `
+    --ahi_angle "D:\Users\lobst\PycharmProjects\6S_Self_Consistency_Zenith_Angles\Himawari_POI_Selection\AHI_data\poi_output\ahi_angles_5km.nc" `
+    --modis_dir "D:\Users\lobst\PycharmProjects\6S_Self_Consistency_Zenith_Angles\Himawari_POI_Selection\MODIS_BRDF_DIR" `
+    --band 3 `
+    --start_date 2016-05-01 `
+    --end_date 2016-05-08 `
+    --output "D:\Users\lobst\PycharmProjects\6S_Self_Consistency_Zenith_Angles\Himawari_POI_Selection\AHI_data\poi_output\brdf_daily.nc"
+
+# -------------------- 步骤 5b: 从本地 BRDF 数据提取候选点的 AI 统计 --------------------
+
+python Himawari_POI_Selection/extract_modis_at_pois.py `
+    --candidates_nc "D:\Users\lobst\PycharmProjects\6S_Self_Consistency_Zenith_Angles\Himawari_POI_Selection\AHI_data\poi_output\candidates.nc" `
+    --output_nc "D:\Users\lobst\PycharmProjects\6S_Self_Consistency_Zenith_Angles\Himawari_POI_Selection\AHI_data\poi_output\ahi_brdf_ai.nc" `
+    --gee_key "D:\Users\lobst\PycharmProjects\6S_Self_Consistency_Zenith_Angles\premium-cipher-424203-d0-18b67488cea9.json" `
+    --start_date 2016-05-01 `
+    --end_date 2016-05-08 `
+    --modis_band 3 `
+    --max_workers 3 `
+    --batch_size 100 `
+    --brdf_cache_dir "D:\Users\lobst\PycharmProjects\6S_Self_Consistency_Zenith_Angles\Himawari_POI_Selection\AHI_data\poi_output\brdf_cache" `
+    --use_qa
+
+
+
+# -------------------- 步骤 6: 根据 AI 阈值、土地覆盖、角度分层，筛选最终 POI --------------------
+python Himawari_POI_Selection/select_pois.py `
+    --ai_stats_nc "D:\Users\lobst\PycharmProjects\6S_Self_Consistency_Zenith_Angles\Himawari_POI_Selection\AHI_data\poi_output\ahi_brdf_ai.nc" `
+    --output_csv "D:\Users\lobst\PycharmProjects\6S_Self_Consistency_Zenith_Angles\Himawari_POI_Selection\AHI_data\poi_output\poi_list.csv" `
+    --output_nc "D:\Users\lobst\PycharmProjects\6S_Self_Consistency_Zenith_Angles\Himawari_POI_Selection\AHI_data\poi_output\poi_list.nc" `
+    --ai_threshold 0.15
+
+# -------------------- 步骤 7: 为每个 POI 提取 MERRA-2 气象数据时间序列 --------------------
+# 注意：请确保 MERRA2 数据已按 prepare_merra2.py 要求的格式存放在以下目录
+python Himawari_POI_Selection/prepare_merra2.py `
+    --poi_nc "D:\Users\lobst\PycharmProjects\6S_Self_Consistency_Zenith_Angles\Himawari_POI_Selection\AHI_data\poi_output\poi_list.nc" `
+    --merra2_dir "D:\Users\lobst\PycharmProjects\6S_Self_Consistency_Zenith_Angles\Himawari_POI_Selection\MERRA2_10min\combined" `
+    --start_date 2016-05-01 `
+    --end_date 2016-05-08 `
+    --output_dir "D:\Users\lobst\PycharmProjects\6S_Self_Consistency_Zenith_Angles\Himawari_POI_Selection\AHI_data\poi_output\merra2_poi"
+
+# -------------------- （可选）步骤 8: 提取 DEM 高程（如果 extract_modis_at_pois 未包含）--------------------
+python Himawari_POI_Selection/extract_elevation.py `
+    --poi_nc "D:\Users\lobst\PycharmProjects\6S_Self_Consistency_Zenith_Angles\Himawari_POI_Selection\AHI_data\poi_output\poi_list.nc" `
+    --dem_file "D:\Users\lobst\PycharmProjects\6S_Self_Consistency_Zenith_Angles\Himawari_POI_Selection\SRTM\SRTM_DEM.nc" `
+    --output "D:\Users\lobst\PycharmProjects\6S_Self_Consistency_Zenith_Angles\Himawari_POI_Selection\AHI_data\poi_output\poi_list_with_elev.nc"
+
+
+

@@ -621,11 +621,22 @@ class VisualizationSuite:
             self._plot_delta_toa_contour_single(data, raa)
 
     def _plot_delta_toa_contour_single(self, data: pd.DataFrame, raa: float):
-        """为单个 RAA 绘制 ΔTOA Contour 图（自动色标，坐标轴只到89°）"""
+        """
+        为单个 RAA 绘制 ΔTOA Contour 图。
+
+        关键改动（为了解决“极端角度把色标拉爆，内部变化看不见”的问题）：
+        1) 绘图时优先使用未截断的 ΔTOA：若存在 rho_toa_sa/rho_toa_ppa 则现场重算；
+        2) 使用以 0 为中心的对称对数归一化 SymLogNorm：
+           - |ΔTOA| <= linthresh：线性（保留 10^-3~10^-2 的细微变化）
+           - |ΔTOA| >  linthresh：对数压缩（容纳 10^0~10^1 的极端值）
+        3) colorbar 明确标注 symlog 与 linthresh，刻度采用对称对数风格。
+        """
+        from matplotlib.colors import SymLogNorm  # 局部导入，避免你额外改全局 import
+
         filtered_data = data[
             (np.abs(data['rho_true'] - self.fixed_rho_true) < 0.0001) &
             (np.abs(data['raa'] - raa) < 0.01)
-        ].copy()
+            ].copy()
 
         if filtered_data.empty:
             self.logger.error(f"错误: 没有找到 rho_true={self.fixed_rho_true}, raa={raa} 的精确匹配数据")
@@ -634,7 +645,14 @@ class VisualizationSuite:
 
         self.logger.info(f"Contour图 (RAA={raa}) 使用数据: {len(filtered_data)} 条记录")
 
-        target_col = 'delta_toa'
+        # === 优先使用未截断的 ΔTOA（避免被 _load_validation_grid_data 的 clip 掩盖极端值）===
+        if ('rho_toa_sa' in filtered_data.columns) and ('rho_toa_ppa' in filtered_data.columns):
+            target_col = '_delta_toa_plot'
+            filtered_data[target_col] = filtered_data['rho_toa_sa'] - filtered_data['rho_toa_ppa']
+            self.logger.info("绘图使用未截断 ΔTOA：由 rho_toa_sa - rho_toa_ppa 现场计算")
+        else:
+            target_col = 'delta_toa'
+            self.logger.warning("未找到 rho_toa_sa/rho_toa_ppa，绘图将使用 delta_toa 列（可能已被截断）")
 
         atm_order = ['clean', 'average', 'polluted']
         bands = ['band1', 'band2', 'band3', 'band4', 'band5', 'band6']
@@ -660,25 +678,66 @@ class VisualizationSuite:
         extreme_sza_indices = np.where(sza_grid >= 85)[0]
         extreme_vza_indices = np.where(vza_grid >= 85)[0]
 
-        # 获取全局数据范围用于自动色标
-        all_vals = filtered_data[target_col].dropna()
-        if len(all_vals) == 0:
+        # === 统计全局范围，用于统一色标（同一张图保持一致，便于比较）===
+        all_vals = filtered_data[target_col].to_numpy()
+        all_vals = all_vals[np.isfinite(all_vals)]
+        if all_vals.size == 0:
             self.logger.error("没有有效的 ΔTOA 值，跳过该 RAA 绘图")
             return
 
-        vmin_auto = all_vals.min()
-        vmax_auto = all_vals.max()
-        self.logger.info(f"自动色标范围: vmin={vmin_auto:.4f}, vmax={vmax_auto:.4f}")
+        # 建议用对称范围，便于正负误差对比
+        abs_max = float(np.nanmax(np.abs(all_vals)))
+        if abs_max == 0:
+            abs_max = 1e-12
 
-        # 设置归一化，确保 0 为白色（使用 TwoSlopeNorm）
-        if vmin_auto < 0 < vmax_auto:
-            norm = TwoSlopeNorm(vcenter=0, vmin=vmin_auto, vmax=vmax_auto)
+        # === SymLog 的线性阈值：用于“放大”你关心的内部小变化 ===
+        # 经验上取 1e-2 很适合你描述的 10e-3 量级；
+        # 但也做了自适应下限，避免数据更小时过度放大噪声。
+        positive = np.abs(all_vals[np.abs(all_vals) > 0])
+        if positive.size > 0:
+            # 取一个稳健尺度：中位数的 0.5 倍 与 1e-2 取更小者，但不低于 1e-4
+            robust = float(np.nanmedian(positive)) * 0.5
+            linthresh = max(1e-4, min(1e-2, robust))
         else:
-            # 如果数据全部同号，回退到线性归一化（但中心不为0白色）
-            norm = Normalize(vmin=vmin_auto, vmax=vmax_auto)
-            self.logger.warning("数据没有跨越0，使用线性归一化，0可能不是白色")
+            linthresh = 1e-2
 
-        cmap = 'RdBu_r'  # 红色为正，蓝色为负，白色为0
+        # 如果动态范围不大（例如 abs_max <= 3*linthresh），就用线性 TwoSlope 更直观
+        use_symlog = abs_max > 3.0 * linthresh
+
+        self.logger.info(
+            f"色标设置: abs_max={abs_max:.3e}, linthresh={linthresh:.3e}, "
+            f"mode={'symlog' if use_symlog else 'linear'}"
+        )
+
+        if use_symlog:
+            norm = SymLogNorm(linthresh=linthresh, linscale=1.0, vmin=-abs_max, vmax=abs_max, base=10)
+        else:
+            # 小动态范围：线性且 0 为中心
+            norm = TwoSlopeNorm(vcenter=0.0, vmin=-abs_max, vmax=abs_max)
+
+        cmap = 'RdBu_r'  # 红正、蓝负、白色在 0 附近
+
+        # === 为 contourf 构造更合理的 levels（线性+对数混合），避免 symlog 下等距 levels 不好看 ===
+        def _build_symlog_levels(vmax_abs: float, lt: float, n_lin: int = 9, n_log: int = 12):
+            vmax_abs = float(vmax_abs)
+            lt = float(lt)
+            if vmax_abs <= lt:
+                return np.linspace(-vmax_abs, vmax_abs, 21)
+
+            # 线性段：[-lt, lt]
+            lin_levels = np.linspace(-lt, lt, n_lin)
+
+            # 对数段：正、负对称
+            log_max_exp = np.log10(vmax_abs)
+            log_min_exp = np.log10(lt)
+            pos = np.logspace(log_min_exp, log_max_exp, n_log)
+            neg = -pos[::-1]
+
+            levels = np.unique(np.concatenate([neg, lin_levels, pos]))
+            levels.sort()
+            return levels
+
+        levels = _build_symlog_levels(abs_max, linthresh) if use_symlog else np.linspace(-abs_max, abs_max, 21)
 
         fig, axes = plt.subplots(3, 6, figsize=(24, 12), gridspec_kw={'hspace': 0.3, 'wspace': 0.3})
 
@@ -687,7 +746,7 @@ class VisualizationSuite:
             cond_data = filtered_data[
                 (np.abs(filtered_data['aod550'] - cond_params['aod550']) < 0.001) &
                 (np.abs(filtered_data['h2o'] - cond_params['h2o']) < 0.01)
-            ]
+                ]
 
             for col_idx, band in enumerate(bands):
                 ax = axes[row_idx, col_idx]
@@ -709,10 +768,8 @@ class VisualizationSuite:
                 band_data['vza_rounded'] = band_data['vza'].apply(
                     lambda x: min(vza_grid, key=lambda g: abs(g - x)) if x <= 89 else np.nan
                 )
-                # 丢弃角度 >89 的数据
                 band_data.dropna(subset=['sza_rounded', 'vza_rounded'], inplace=True)
 
-                # 按网格点分组，取中位数
                 grouped = band_data.groupby(['vza_rounded', 'sza_rounded'])[target_col].median().reset_index()
 
                 for _, row in grouped.iterrows():
@@ -725,42 +782,50 @@ class VisualizationSuite:
                     self.logger.warning(f"波段 {band}, 条件 {condition_key}: 数据覆盖率仅 {coverage:.1f}%")
 
                 if np.sum(~np.isnan(matrix)) > 0:
-                    # 等高线层级：使用自动范围生成 21 层
-                    levels = np.linspace(vmin_auto, vmax_auto, 21)
-                    contour = ax.contourf(X_idx, Y_idx, matrix, levels=levels, cmap=cmap, norm=norm, extend='both')
+                    contour = ax.contourf(
+                        X_idx, Y_idx, matrix,
+                        levels=levels, cmap=cmap, norm=norm, extend='both'
+                    )
 
-                    # 添加黑色等高线（可选）
-                    if np.nanstd(matrix) > 0.0001:
-                        contour_levels = np.linspace(vmin_auto, vmax_auto, 6)[1:-1]
-                        ax.contour(X_idx, Y_idx, matrix, levels=contour_levels, colors='black', linewidths=0.5, alpha=0.5)
+                    # 叠加少量等值线（帮助读者在非线性映射下仍能读出结构）
+                    # 只在变化不近似常数时绘制
+                    if np.nanstd(matrix) > 0:
+                        # 在 |Δ| <= linthresh 附近加密几条线，强调内部变化
+                        if use_symlog:
+                            fine = np.linspace(-linthresh, linthresh, 7)
+                            fine = fine[np.abs(fine) > 0]  # 去掉 0，避免标签/线条重叠
+                            ax.contour(X_idx, Y_idx, matrix, levels=fine, colors='k', linewidths=0.4, alpha=0.35)
+                        else:
+                            mid = np.linspace(-abs_max, abs_max, 6)[1:-1]
+                            ax.contour(X_idx, Y_idx, matrix, levels=mid, colors='k', linewidths=0.5, alpha=0.4)
 
                     # 标记极端角度区域
-                    for sza_idx in extreme_sza_indices:
-                        ax.axvline(x=sza_idx, color='yellow', linestyle=':', linewidth=1.5, alpha=0.7)
-                    for vza_idx in extreme_vza_indices:
-                        ax.axhline(y=vza_idx, color='yellow', linestyle=':', linewidth=1.5, alpha=0.7)
+                    for sza_i in extreme_sza_indices:
+                        ax.axvline(x=sza_i, color='yellow', linestyle=':', linewidth=1.5, alpha=0.7)
+                    for vza_i in extreme_vza_indices:
+                        ax.axhline(y=vza_i, color='yellow', linestyle=':', linewidth=1.5, alpha=0.7)
 
-                    # 半透明红色背景表示极端角度区域
                     if len(extreme_sza_indices) > 0:
                         ax.axvspan(extreme_sza_indices[0] - 0.5, extreme_sza_indices[-1] + 0.5,
-                                   alpha=0.1, color='red')
+                                   alpha=0.10, color='red')
                     if len(extreme_vza_indices) > 0:
                         ax.axhspan(extreme_vza_indices[0] - 0.5, extreme_vza_indices[-1] + 0.5,
-                                   alpha=0.1, color='red')
+                                   alpha=0.10, color='red')
 
-                    # 绘制数据点位置（小叉）
-                    ax.scatter([sza_to_idx[v] for v in band_data['sza_rounded']],
-                               [vza_to_idx[v] for v in band_data['vza_rounded']],
-                               s=10, color='black', alpha=0.3, marker='x')
+                    # 数据点位置
+                    ax.scatter(
+                        [sza_to_idx[v] for v in band_data['sza_rounded']],
+                        [vza_to_idx[v] for v in band_data['vza_rounded']],
+                        s=10, color='black', alpha=0.25, marker='x'
+                    )
                 else:
                     ax.text(0.5, 0.5, "No Valid Data", ha='center', va='center', fontsize=10)
 
-                # 子图标题（波段+波长）
+                # 标题与标签
                 if row_idx == 0:
                     wl = ExperimentConfig.BANDS[band]['wavelength']
-                    ax.set_title(f'Band {col_idx+1} ({wl}µm)', fontweight='bold', fontsize=10)
+                    ax.set_title(f'Band {col_idx + 1} ({wl}µm)', fontweight='bold', fontsize=10)
 
-                # 行标签（大气条件）
                 if col_idx == 0:
                     ax.text(-0.35, 0.5, cond_params['name'], transform=ax.transAxes,
                             rotation=90, va='center', fontweight='bold', fontsize=10)
@@ -768,7 +833,6 @@ class VisualizationSuite:
                 ax.set_xlabel('Solar Zenith Angle (°)', fontsize=9)
                 ax.set_ylabel('View Zenith Angle (°)', fontsize=9)
 
-                # 设置 x 轴刻度：只显示 ≤89° 的标签，且用 * 标记极端角度
                 x_ticks = np.arange(len(sza_grid))
                 x_labels = [f'{int(x)}' + ('*' if x >= 85 else '') for x in sza_grid]
                 ax.set_xticks(x_ticks)
@@ -779,31 +843,60 @@ class VisualizationSuite:
                 ax.set_yticks(y_ticks)
                 ax.set_yticklabels(y_labels, fontsize=7)
 
-                # 设置坐标轴范围至最后一个有效角度索引
                 ax.set_xlim(-0.5, len(sza_grid) - 0.5)
                 ax.set_ylim(-0.5, len(vza_grid) - 0.5)
-
-                ax.tick_params(axis='both', which='major', labelsize=8)
                 ax.grid(True, alpha=0.2)
 
-        # 颜色条
+        # === colorbar ===
         cbar_ax = fig.add_axes([0.92, 0.15, 0.02, 0.7])
         sm = ScalarMappable(cmap=cmap, norm=norm)
         sm.set_array([])
 
-        # 自动生成刻度（7个左右）
-        ticks = np.linspace(vmin_auto, vmax_auto, 7)
-        cbar = fig.colorbar(sm, cax=cbar_ax, ticks=ticks, format='%.2f')
-        cbar.set_label('ΔTOA = ρ_TOA^SA - ρ_TOA^PPA (auto-scaled)', fontsize=10)
+        def _build_symlog_ticks(vmax_abs: float, lt: float):
+            vmax_abs = float(vmax_abs)
+            lt = float(lt)
+            if vmax_abs <= lt:
+                return np.linspace(-vmax_abs, vmax_abs, 7)
+
+            ticks_pos = []
+            e_min = int(np.floor(np.log10(lt)))
+            e_max = int(np.ceil(np.log10(vmax_abs)))
+            for e in range(e_min, e_max + 1):
+                for m in (1, 2, 5):
+                    v = m * (10 ** e)
+                    if lt <= v <= vmax_abs * 1.0000001:
+                        ticks_pos.append(v)
+            ticks_pos = np.unique(np.array(ticks_pos, dtype=float))
+            ticks = np.concatenate([-ticks_pos[::-1], [0.0], ticks_pos])
+            # 确保包含端点（视觉更稳）
+            if ticks.size > 0:
+                if ticks[0] > -vmax_abs:
+                    ticks = np.insert(ticks, 0, -vmax_abs)
+                if ticks[-1] < vmax_abs:
+                    ticks = np.append(ticks, vmax_abs)
+            return ticks
+
+        if use_symlog:
+            ticks = _build_symlog_ticks(abs_max, linthresh)
+            cbar = fig.colorbar(sm, cax=cbar_ax, ticks=ticks)
+            cbar.ax.set_yticklabels([f"{t:.0e}" if t != 0 else "0" for t in ticks])
+            cbar.set_label(f'ΔTOA = ρ_TOA^SA - ρ_TOA^PPA (symlog, linthresh={linthresh:.0e})', fontsize=10)
+        else:
+            ticks = np.linspace(-abs_max, abs_max, 7)
+            cbar = fig.colorbar(sm, cax=cbar_ax, ticks=ticks, format='%.2e')
+            cbar.set_label('ΔTOA = ρ_TOA^SA - ρ_TOA^PPA (linear, centered at 0)', fontsize=10)
+
         cbar.ax.tick_params(labelsize=8)
 
-        extreme_note = ("* denotes extreme angles (≥85°); yellow dotted lines and red shading highlight extreme angle regions; "
-                        "color scale automatically adjusted to data range, with white at zero.")
+        extreme_note = (
+            "* denotes extreme angles (≥85°); yellow dotted lines and red shading highlight extreme angle regions. "
+            "Color mapping uses symmetric scaling about 0; when dynamic range is large, symlog is used so both "
+            "small interior variations and large extreme-angle excursions remain visible."
+        )
         fig.text(0.5, 0.02, extreme_note, ha='center', fontsize=9, style='italic')
 
         param_text = f" (ρ={self.fixed_rho_true}, RAA={raa}°) - SZA/VZA ≤ 89°"
-        fig.suptitle(f'ΔTOA Contour (auto-scaled, white at 0){param_text}',
-                     fontsize=14, fontweight='bold', y=0.98)
+        fig.suptitle(f'ΔTOA Contour{param_text}', fontsize=14, fontweight='bold', y=0.98)
 
         output_filename = f"plot2_delta_toa_contour_RAA{int(raa):03d}{self.suffix}.png"
         output_path = self.output_dir / output_filename

@@ -496,7 +496,7 @@ class ModelEvaluator:
         plt.close()
 
     def _plot_scatter_matrix(self, X_test: pd.DataFrame, y_test: pd.Series):
-        """绘制散点图矩阵"""
+        """绘制散点图矩阵（使用 symlog 缩放，仅显示 [-10,10] 范围）"""
         n_models = len(self.models)
         n_cols = min(3, n_models)
         n_rows = (n_models + n_cols - 1) // n_cols
@@ -510,25 +510,38 @@ class ModelEvaluator:
             ax = axes[idx]
             y_pred = model.predict(X_test)
 
-            # 计算对称的轴范围
-            data_min = min(y_test.min(), y_pred.min())
-            data_max = max(y_test.max(), y_pred.max())
-            data_range = max(abs(data_min), abs(data_max))
-            axis_limit = max(0.10, np.ceil(data_range * 10) / 10)  # 确保至少0.1
+            # 过滤超出 [-10,10] 的点
+            mask = (np.abs(y_test) <= 10) & (np.abs(y_pred) <= 10)
+            y_test_filt = y_test[mask]
+            y_pred_filt = y_pred[mask]
+
+            if len(y_test_filt) == 0:
+                ax.text(0.5, 0.5, 'No data in [-10,10]', ha='center', va='center')
+                ax.set_title(f'{model_name}')
+                continue
+
+            # 固定轴范围
+            axis_limit = 10
             ax.set_xlim(-axis_limit, axis_limit)
             ax.set_ylim(-axis_limit, axis_limit)
             ax.set_aspect('equal')
 
-            abs_errors = np.abs(y_test - y_pred)
-            scatter = ax.scatter(y_test, y_pred, alpha=0.6, s=10,
+            # 设置 symlog 缩放
+            ax.set_xscale('symlog', linthresh=1, linscale=1)
+            ax.set_yscale('symlog', linthresh=1, linscale=1)
+
+            # 计算绝对误差用于颜色映射
+            abs_errors = np.abs(y_test_filt - y_pred_filt)
+            scatter = ax.scatter(y_test_filt, y_pred_filt, alpha=0.6, s=10,
                                  c=abs_errors, cmap=SCATTER_CMAP, edgecolors='none')
 
-            # 1:1线
+            # 1:1 线
             ax.plot([-axis_limit, axis_limit], [-axis_limit, axis_limit], 'r--', lw=1.5, alpha=0.8)
 
-            rmse = np.sqrt(mean_squared_error(y_test, y_pred))
-            r2 = r2_score(y_test, y_pred)
-            mae = mean_absolute_error(y_test, y_pred)
+            # 性能指标
+            rmse = np.sqrt(mean_squared_error(y_test_filt, y_pred_filt))
+            r2 = r2_score(y_test_filt, y_pred_filt)
+            mae = mean_absolute_error(y_test_filt, y_pred_filt)
 
             ax.text(0.05, 0.95, f'RMSE = {rmse:.4f}\nR² = {r2:.3f}\nMAE = {mae:.4f}',
                     transform=ax.transAxes, fontsize=8, verticalalignment='top',
@@ -543,14 +556,13 @@ class ModelEvaluator:
                 ax.spines[spine].set_visible(False)
             ax.tick_params(axis='both', which='both', length=4, width=0.75, direction='out', labelsize=8)
 
-            # 应用自定义刻度
-            self._set_custom_ticks(ax, axis_limit)
-
+            # 添加颜色条（只在第一个子图添加，避免重复）
             if idx == 0:
                 cbar = plt.colorbar(scatter, ax=ax, shrink=0.8)
                 cbar.set_label('Absolute Error', fontsize=8)
                 cbar.ax.tick_params(labelsize=7)
 
+        # 隐藏多余的子图
         for idx in range(len(self.models), len(axes)):
             axes[idx].set_visible(False)
 
@@ -560,13 +572,19 @@ class ModelEvaluator:
         plt.close()
 
     def _plot_hexbin_scatter(self, X_test: pd.DataFrame, y_test: pd.Series):
-        """绘制专业的Hexbin散点图 - 科研红蓝配色版"""
+        """绘制专业的Hexbin散点图（使用 symlog 缩放，仅显示 [-10,10] 范围，颜色条为线性计数）"""
         print("   Generating professional hexbin scatter plots...")
 
+        # 按 R² 排序模型
         model_performance = []
         for model_name, model in self.models.items():
             y_pred = model.predict(X_test)
-            r2 = r2_score(y_test, y_pred)
+            # 过滤超出范围的点以计算指标（仅用于排序，实际绘图时也会过滤）
+            mask = (np.abs(y_test) <= 10) & (np.abs(y_pred) <= 10)
+            if mask.sum() == 0:
+                r2 = -np.inf
+            else:
+                r2 = r2_score(y_test[mask], y_pred[mask])
             model_performance.append((model_name, model, r2, y_pred))
 
         model_performance.sort(key=lambda x: x[2], reverse=True)
@@ -580,6 +598,7 @@ class ModelEvaluator:
             axes = np.array([axes])
         axes = axes.flatten()
 
+        # 使用红蓝 diverging 调色板
         try:
             import seaborn as sns
             red_blue_cmap = sns.diverging_palette(240, 10, as_cmap=True)
@@ -588,35 +607,48 @@ class ModelEvaluator:
             red_blue_cmap = plt.cm.RdBu_r
             print("   Using matplotlib RdBu_r color palette")
 
-        for idx, (model_name, model, r2_value, y_pred) in enumerate(model_performance[:len(axes)]):
+        for idx, (model_name, model, r2_value, y_pred_full) in enumerate(model_performance[:len(axes)]):
             ax = axes[idx]
 
-            residuals = y_pred - y_test
-            data_min = min(y_test.min(), y_pred.min())
-            data_max = max(y_test.max(), y_pred.max())
-            data_range = max(abs(data_min), abs(data_max))
-            axis_limit = max(0.10, np.ceil(data_range * 10) / 10)
+            # 过滤数据
+            mask = (np.abs(y_test) <= 10) & (np.abs(y_pred_full) <= 10)
+            y_test_filt = y_test[mask]
+            y_pred_filt = y_pred_full[mask]
+
+            if len(y_test_filt) == 0:
+                ax.text(0.5, 0.5, 'No data in [-10,10]', ha='center', va='center')
+                ax.set_title(f'{model_name}')
+                continue
+
+            # 固定轴范围
+            axis_limit = 10
             ax.set_xlim(-axis_limit, axis_limit)
             ax.set_ylim(-axis_limit, axis_limit)
             ax.set_aspect('equal')
 
-            n_samples = len(y_test)
-            rmse = np.sqrt(mean_squared_error(y_test, y_pred))
-            mae = mean_absolute_error(y_test, y_pred)
+            # 设置 symlog 缩放
+            ax.set_xscale('symlog', linthresh=1, linscale=1)
+            ax.set_yscale('symlog', linthresh=1, linscale=1)
 
-            hexbin = ax.hexbin(y_test, y_pred, gridsize=60, cmap=red_blue_cmap,
+            # 绘制 hexbin
+            hexbin = ax.hexbin(y_test_filt, y_pred_filt, gridsize=60, cmap=red_blue_cmap,
                                mincnt=1, edgecolors='none', alpha=0.9, zorder=4)
 
-            counts = hexbin.get_array()
-
+            # 1:1 线
             x_range = np.array([-axis_limit, axis_limit])
             ax.plot(x_range, x_range, 'k-', linewidth=1.5, label='1:1 Line', zorder=5)
 
-            if len(y_test) > 1:
-                slope, intercept, r_value, p_value, std_err = stats.linregress(y_test, y_pred)
+            # 线性拟合线（可选）
+            if len(y_test_filt) > 1:
+                slope, intercept, r_value, p_value, std_err = stats.linregress(y_test_filt, y_pred_filt)
                 fit_line = slope * x_range + intercept
                 ax.plot(x_range, fit_line, 'k--', linewidth=1.5,
                         label=f'Fit (slope={slope:.3f})', zorder=6)
+
+            # 计算性能指标
+            rmse = np.sqrt(mean_squared_error(y_test_filt, y_pred_filt))
+            mae = mean_absolute_error(y_test_filt, y_pred_filt)
+            n_samples = len(y_test_filt)
 
             ax.set_xlabel('True Value', fontsize=11, fontweight='bold')
             ax.set_ylabel('Predicted Value', fontsize=11, fontweight='bold')
@@ -629,61 +661,58 @@ class ModelEvaluator:
             ax.tick_params(axis='both', which='major', length=6, width=0.8, direction='out', labelsize=9)
             ax.tick_params(axis='both', which='minor', length=3, width=0.5, direction='out', labelsize=7)
 
-            # 应用自定义刻度
-            self._set_custom_ticks(ax, axis_limit)
-
+            # 图例
             handles, labels = ax.get_legend_handles_labels()
             if handles:
                 ax.legend(handles=handles, labels=labels, fontsize=9, frameon=True,
                           framealpha=0.9, edgecolor='black', loc='upper left',
                           bbox_to_anchor=(0.02, 0.98), borderaxespad=0.5, ncol=1)
 
+            # 颜色条（线性计数）
+            counts = hexbin.get_array()
             if counts is not None and len(counts) > 0:
-                log_counts = np.log10(counts)
-                min_log = np.min(log_counts)
-                max_log = np.max(log_counts)
+                min_count = np.min(counts)
+                max_count = np.max(counts)
 
                 from matplotlib.cm import ScalarMappable
                 from matplotlib.colors import Normalize
-                norm = Normalize(vmin=min_log, vmax=max_log)
+                norm = Normalize(vmin=min_count, vmax=max_count)
                 sm = ScalarMappable(cmap=red_blue_cmap, norm=norm)
                 sm.set_array([])
 
                 cbar = plt.colorbar(sm, ax=ax, shrink=0.8, pad=0.03)
-                cbar.set_label('log₁₀(Count)', fontsize=10, fontweight='bold')
+                cbar.set_label('Count', fontsize=10, fontweight='bold')
                 cbar.ax.tick_params(labelsize=8)
 
-                log_range = max_log - min_log
-                if log_range <= 1.0:
-                    tick_step = 0.2
-                elif log_range <= 2.0:
-                    tick_step = 0.5
+                # 设置颜色条刻度（线性）
+                count_range = max_count - min_count
+                if count_range <= 10:
+                    tick_step = 2 if count_range > 0 else 1
+                elif count_range <= 50:
+                    tick_step = 10
+                elif count_range <= 200:
+                    tick_step = 20
                 else:
-                    tick_step = 1.0
-                start_tick = np.floor(min_log / tick_step) * tick_step
-                end_tick = np.ceil(max_log / tick_step) * tick_step
+                    tick_step = 50
+
+                start_tick = np.floor(min_count / tick_step) * tick_step
+                end_tick = np.ceil(max_count / tick_step) * tick_step
                 ticks = np.arange(start_tick, end_tick + tick_step/2, tick_step)
-                ticks = ticks[(ticks >= min_log - 0.1) & (ticks <= max_log + 0.1)]
+                ticks = ticks[(ticks >= min_count - 0.1) & (ticks <= max_count + 0.1)]
 
                 if len(ticks) >= 2:
                     cbar.set_ticks(ticks)
-                    tick_labels = []
-                    for tick in ticks:
-                        if tick.is_integer():
-                            tick_labels.append(f'{int(tick)}')
-                        elif abs(tick * 10 - round(tick * 10)) < 0.01:
-                            tick_labels.append(f'{tick:.1f}')
-                        else:
-                            tick_labels.append(f'{tick:.2f}')
+                    tick_labels = [f'{int(tick)}' if tick.is_integer() else f'{tick:.1f}' for tick in ticks]
                     cbar.set_ticklabels(tick_labels)
                 else:
-                    n_ticks = min(5, int(log_range * 2) + 1)
+                    n_ticks = min(5, int(count_range / tick_step) + 1)
                     if n_ticks >= 2:
-                        ticks = np.linspace(min_log, max_log, n_ticks)
+                        ticks = np.linspace(min_count, max_count, n_ticks)
                         cbar.set_ticks(ticks)
                         tick_labels = [f'{tick:.1f}' for tick in ticks]
                         cbar.set_ticklabels(tick_labels)
 
+        # 隐藏多余的子图
         for idx in range(len(model_performance), len(axes)):
             axes[idx].set_visible(False)
 

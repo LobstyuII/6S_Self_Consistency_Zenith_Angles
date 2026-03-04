@@ -42,7 +42,7 @@ class InversionConfig:
         "luts": "D:/H8_data/LUTs.nc",
         "mod_red": "D:/H8_Data/MODIS_Red_nadir/",
         "mod_nir": "D:/H8_Data/MODIS_NIR_nadir/",
-        "output": "D:/H8_data/LSR_10min/"  # 修改为LSR_10min
+        "output": "D:/H8_data/LSR_10min/"
     }
 
     # Band configuration - 改为分别处理
@@ -70,6 +70,13 @@ class InversionConfig:
         'max_workers': 8,
         'chunk_size': 1000,
         'max_tasks_per_worker': 10000
+    }
+
+    # ========== 新增：站点选择配置 ==========
+    STATION_SELECTION = {
+        'by_vza_group': True,           # 是否启用VZA分组选择
+        'top_per_vza_group': 5,          # 每组选择的站点数
+        'vza_bin_size': 10               # VZA分组间隔（度）
     }
 
 
@@ -150,7 +157,6 @@ class SixSInversionWorker:
 
     def __init__(self, band_wavelength: float):
         self.band_wavelength = band_wavelength
-        # 注意：不再需要预计算大气廓线，因为缓存模块会处理
 
     def run_inversion(self, params: dict):
         """
@@ -171,9 +177,6 @@ class SixSInversionWorker:
                 'atmos_profile': params.get('atmos_profile', 'MidlatitudeSummer'),
                 'aero_profile': params.get('aero_profile', 'Continental'),
                 'target_altitude': params.get('target_altitude', 0.0),
-                # 可选：传递日期和纬度，但目前未用于大气廓线选择（可根据需要启用）
-                # 'date': params.get('date'),
-                # 'lat': params.get('lat'),
             }
 
             # 调用缓存函数
@@ -356,7 +359,8 @@ class AHIInversionDataLoader10min:
                         var_data = l1_ds.variables[col][:][station_indices]
                         if isinstance(var_data, np.ma.MaskedArray):
                             var_data = var_data.filled(np.nan)
-                        data_dict[f'TOA_Albedo_{band_id}'] = var_data / 100.0
+                        # 注意：此处直接使用 var_data，不再除以100
+                        data_dict[f'TOA_Albedo_{band_id}'] = var_data
                 else:
                     # 加载所有波段数据
                     for band in ['01', '02', '03', '04', '05', '06']:
@@ -365,7 +369,8 @@ class AHIInversionDataLoader10min:
                             var_data = l1_ds.variables[col][:][station_indices]
                             if isinstance(var_data, np.ma.MaskedArray):
                                 var_data = var_data.filled(np.nan)
-                            data_dict[f'TOA_Albedo_{band}'] = var_data / 100.0
+                            # 注意：此处直接使用 var_data，不再除以100
+                            data_dict[f'TOA_Albedo_{band}'] = var_data
 
             # 加载L2数据 (可用性)
             with nc.Dataset(l2_file_path) as l2_ds:
@@ -625,6 +630,45 @@ class CachedInversionProcessor10min:
         except Exception as e:
             print(f"Error loading from cache: {e}")
             return None, None
+
+    # ========== 新增：按VZA分组选择代表性站点 ==========
+    def select_stations_by_vza_group(self, ahi_data, station_stats, top_per_group=5, vza_bin_size=10):
+        """
+        按VZA每vza_bin_size度分组，每组选择有效数据最多的top_per_group个站点
+        ahi_data: DataFrame，必须包含'station'和'SAZ'列
+        station_stats: 字典，包含每个站点的'records'等信息
+        """
+        # 计算每个站点的平均VZA（也可用中位数）
+        station_vza = ahi_data.groupby('station')['SAZ'].mean().to_dict()
+
+        # 构建DataFrame
+        df_stations = []
+        for station, stats in station_stats.items():
+            if station in station_vza:
+                vza = station_vza[station]
+                records = stats.get('records', 0)
+                df_stations.append({'station': station, 'vza': vza, 'records': records})
+        df = pd.DataFrame(df_stations)
+        if df.empty:
+            return []
+
+        # 定义VZA区间
+        bins = np.arange(0, 91, vza_bin_size)
+        labels = [f"{int(bins[i])}-{int(bins[i+1])}" for i in range(len(bins)-1)]
+        df['vza_bin'] = pd.cut(df['vza'], bins=bins, labels=labels, right=False)
+
+        selected_stations = []
+        for bin_label in labels:
+            df_bin = df[df['vza_bin'] == bin_label]
+            if df_bin.empty:
+                continue
+            # 按记录数降序排序，取前top_per_group
+            df_bin_sorted = df_bin.sort_values('records', ascending=False)
+            selected = df_bin_sorted.head(top_per_group)['station'].tolist()
+            selected_stations.extend(selected)
+            print(f"  VZA bin {bin_label}: {len(df_bin)} stations, selected {len(selected)}")
+
+        return selected_stations
 
     def prepare_inversion_params_for_band(self, ahi_data, band_id):
         """准备反演参数 - 针对单个波段"""
@@ -950,11 +994,37 @@ class CachedInversionProcessor10min:
         print(f"\nStep 3: Calculating station data availability for band {band_id} (10min resolution)...")
         station_stats = self.calculate_station_availability(ahi_data, band_id)
 
-        # 7. 按可用性过滤站点
+        # 7. 按可用性过滤站点（初步过滤）
         print(f"\nStep 4: Filtering stations by availability for band {band_id}...")
         filtered_stations = self.filter_stations_by_availability(
             station_stats, min_availability, max_stations
         )
+
+        # ========== 新增：按VZA分组选择代表性站点 ==========
+        station_selection_config = getattr(self.config, 'STATION_SELECTION', {})
+        if station_selection_config.get('by_vza_group', False):
+            print(f"\nStep 4b: Selecting top stations per VZA group...")
+            top_per_group = station_selection_config.get('top_per_vza_group', 5)
+            vza_bin_size = station_selection_config.get('vza_bin_size', 10)
+            # 获取可用性过滤后的AHI数据（用于计算VZA）
+            ahi_data_avail = ahi_data[ahi_data['station'].isin(filtered_stations)].copy()
+            if not ahi_data_avail.empty:
+                # 仅传递在filtered_stations范围内的station_stats子集
+                filtered_stats = {s: station_stats[s] for s in filtered_stations if s in station_stats}
+                selected_by_vza = self.select_stations_by_vza_group(
+                    ahi_data_avail,
+                    filtered_stats,
+                    top_per_group=top_per_group,
+                    vza_bin_size=vza_bin_size
+                )
+                if selected_by_vza:
+                    filtered_stations = selected_by_vza
+                    print(f"    Selected {len(filtered_stations)} stations after VZA grouping.")
+                else:
+                    print("    VZA grouping returned no stations, using previous filtered list.")
+            else:
+                print("    No data available for VZA grouping, using previous filtered list.")
+        # ====================================================
 
         if not filtered_stations:
             print(f"Warning: No stations meet the availability criteria for band {band_id}")

@@ -1,8 +1,11 @@
-# ==================== sixs_inversion.py ====================
+# ==================== sixs_inversion.py (调试版) ====================
 """
 6S反演核心模块（带缓存）
 提供从TOA反射率反演LSR的功能，并缓存计算结果避免重复运行。
+修正：几何参数传递方式，明确使用太阳方位角和传感器方位角。
+增加调试打印，输出每次反演的输入输出。
 """
+
 import os
 import hashlib
 import pickle
@@ -46,12 +49,14 @@ class SixSInversion:
         执行单次反演
         参数:
             params: 字典，必须包含以下键：
-                - sza, vza, raa, rho_toa (待反演的TOA反射率)
+                - sza, vza, rho_toa
                 - aod550, h2o, o3
                 - wavelength (可选，若未提供则使用初始化时波长)
                 - atmos_profile, aero_profile (可选，默认 MidlatitudeSummer, Continental)
                 - target_altitude (默认 0.0)
-                - date, lat (用于自动大气廓线，暂未使用)
+                - solar_a: 太阳方位角（可选，默认0）
+                - view_a: 传感器方位角（可选，默认与solar_a相对，若只提供raa则退化为solar_a=0, view_a=raa）
+                - raa: 相对方位角（可选，用于特征但不直接用于几何设置）
         返回:
             dict: 包含 'rho_lsr' 及其他诊断信息
         """
@@ -83,12 +88,24 @@ class SixSInversion:
             else:
                 s.aot550 = 0.1
 
-            # 几何
+            # 几何设置
             s.geometry = Geometry.User()
             s.geometry.solar_z = params['sza']
-            s.geometry.solar_a = params.get('phi', 0.0)
+
+            # 优先使用绝对方位角（solar_a, view_a）
+            if 'solar_a' in params and 'view_a' in params:
+                s.geometry.solar_a = params['solar_a']
+                s.geometry.view_a = params['view_a']
+            else:
+                # 如果没有绝对方位角，则使用简化模式：solar_a=0, view_a=raa
+                raa = params.get('raa', 0.0)
+                s.geometry.solar_a = 0.0
+                s.geometry.view_a = raa
+                # 发出警告，提醒用户
+                if 'solar_a' not in params or 'view_a' not in params:
+                    print("Warning: solar_a or view_a missing, using solar_a=0, view_a=raa (relative azimuth)")
+
             s.geometry.view_z = params['vza']
-            s.geometry.view_a = params.get('raa', 0.0)  # 注意：6S中view_a是相对方位角
 
             # 高度
             s.altitudes = Altitudes()
@@ -102,6 +119,17 @@ class SixSInversion:
 
             rho_lsr = s.outputs.values['pixel_reflectance']
 
+            # ========== 调试输出 ==========
+            print(f"[SixSInversion] rho_toa_in={rho_toa:.8f} -> rho_lsr_out={rho_lsr:.8f}")
+            # 可选：打印一些大气参数，检查它们是否变化
+            try:
+                path_ref = s.outputs.values.get('path_reflectance', np.nan)
+                trans = s.outputs.values.get('total_gas_transmittance', np.nan)
+                print(f"                 path_reflectance={path_ref:.6f}, transmittance={trans:.6f}")
+            except:
+                pass
+            # ============================
+
             # 清理
             del s
             gc.collect()
@@ -113,6 +141,7 @@ class SixSInversion:
             }
 
         except Exception as e:
+            print(f"[SixSInversion] ERROR: {e}")
             return {
                 'success': False,
                 'error': str(e),
@@ -121,10 +150,7 @@ class SixSInversion:
 
 
 def _hash_params(params: dict, precision: dict = None) -> str:
-    """
-    将参数字典转换为哈希键，用于缓存。
-    参数按一定精度四舍五入以避免微小差异导致缓存失效。
-    """
+    """将参数字典转换为哈希键，用于缓存。"""
     if precision is None:
         precision = {
             'sza': 2,
@@ -136,67 +162,45 @@ def _hash_params(params: dict, precision: dict = None) -> str:
             'rho_toa': 6,
             'wavelength': 4,
         }
-
-    # 提取关键参数并量化
     key_parts = []
     for key in ['sza', 'vza', 'raa', 'aod550', 'h2o', 'o3', 'rho_toa', 'wavelength']:
         val = params.get(key)
         if val is None:
             val = 0.0
         prec = precision.get(key, 4)
-        # 四舍五入到指定小数位
         rounded = round(float(val), prec)
         key_parts.append(f"{rounded:.{prec}f}")
-
-    # 添加配置字符串
     key_parts.append(params.get('atmos_profile', 'MidlatitudeSummer'))
     key_parts.append(params.get('aero_profile', 'Continental'))
     key_parts.append(str(params.get('target_altitude', 0.0)))
-
-    # 合并为字符串
     key_str = '_'.join(key_parts)
-    # 生成哈希
     return hashlib.md5(key_str.encode('utf-8')).hexdigest()
 
 
 def run_inversion_cached(params: dict, cache_dir: Path = DEFAULT_CACHE_DIR) -> dict:
-    """
-    带缓存的6S反演。先检查缓存，若无则运行并保存。
-    返回的字典包含 'rho_lsr' 和 'success' 等字段。
-    """
+    """带缓存的6S反演（可选用）"""
     cache_dir = Path(cache_dir)
     cache_dir.mkdir(exist_ok=True)
-
-    # 生成缓存键
     cache_key = _hash_params(params)
     cache_file = cache_dir / f"{cache_key}.pkl"
-
-    # 检查缓存
     if cache_file.exists():
         try:
             with open(cache_file, 'rb') as f:
                 result = pickle.load(f)
-            # 添加缓存命中标记
             result['from_cache'] = True
             return result
         except Exception:
-            # 缓存损坏，重新计算
             pass
-
-    # 创建反演器并运行
     wavelength = params.get('wavelength')
     if wavelength is None:
         raise ValueError("Missing 'wavelength' in params")
     inverter = SixSInversion(wavelength)
     result = inverter.run(params)
     result['from_cache'] = False
-
-    # 保存到缓存（仅成功的结果可缓存，失败也可缓存避免反复尝试？根据需求决定）
     if result['success']:
         try:
             with open(cache_file, 'wb') as f:
                 pickle.dump(result, f)
         except Exception as e:
             print(f"Warning: failed to save cache {cache_file}: {e}")
-
     return result
